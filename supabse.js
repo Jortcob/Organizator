@@ -1,8 +1,16 @@
 import 'react-native-url-polyfill/auto';
 import { createClient } from '@supabase/supabase-js';
 
-// Usamos las variables de entorno de Expo
-const supabaseUrl = process.env.EXPO_PUBLIC_SUPABASE_URL;
-const supabaseAnonKey = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY;
+const rawUrl = process.env.EXPO_PUBLIC_SUPABASE_URL || '';
+const rawKey = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY || '';
 
-export const supabase = createClient(supabaseUrl, supabaseAnonKey);
+const supabaseUrl = rawUrl.replace(/\/rest\/v1\/?$/, '').replace(/\/+$/, '') || 'https://gbvgtnjzoyazabexrxuc.supabase.co';
+const supabaseAnonKey = rawKey || 'sb_publishable_wiV32ExGgwbzD80mp8lrtw_wy-w1Zbe';
+
+export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
+    auth: {
+        persistSession: false,
+        autoRefreshToken: false,
+        detectSessionInUrl: false,
+    },
+});

@@ -1,0 +1,10 @@
+{
+  "expo": {
+    "name": "Organizator",
+    "slug": "organizator",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "dark",
+    "backgroundColor": "#000000"
+  }
+}
