@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import {
     View,
     Text,
@@ -10,439 +10,280 @@ import {
     ActivityIndicator,
     Modal,
 } from 'react-native';
-import { supabase } from './supabase';
+import {
+    getStoreState,
+    subscribeStore,
+    addTransaction,
+    deleteTransaction,
+    computePeriodMetrics,
+} from './dataStore';
 
 const CATEGORIES_EXPENSE = [
-    { id: 'comida', label: '🥩 Alimentación', icon: '🥩' },
-    { id: 'infra', label: '🖥️ Servidores/Infra', icon: '🖥️' },
-    { id: 'fijos', label: '🏠 Gastos Fijos', icon: '🏠' },
-    { id: 'ocio', label: '🍸 Ocio & Estilo', icon: '🍸' },
-    { id: 'otros', label: '📦 Otros Gastos', icon: '📦' },
+    { id: 'Alimentación', label: '🥩 Alimentación' },
+    { id: 'Infraestructura', label: '🖥️ Infraestructura' },
+    { id: 'Gastos fijos', label: '🏠 Gastos fijos' },
+    { id: 'Ocio', label: '🍸 Ocio' },
+    { id: 'Otros', label: '📦 Otros' },
 ];
 
 const CATEGORIES_INCOME = [
-    { id: 'facturacion', label: '💼 Facturación', icon: '💼' },
-    { id: 'inversiones', label: '📈 Inversiones', icon: '📈' },
-    { id: 'extra', label: '⚡ Ingreso Extra', icon: '⚡' },
+    { id: 'Facturación', label: '💼 Facturación' },
+    { id: 'Inversiones', label: '📈 Inversiones' },
+    { id: 'Extra', label: '✨ Extra' },
 ];
 
 export default function FinanceScreen({ onNavigate }) {
-    const [loading, setLoading] = useState(true);
+    const [storeState, setStoreState] = useState(null);
+    const [filterTab, setFilterTab] = useState('all');
     const [saving, setSaving] = useState(false);
-    const [userId, setUserId] = useState(null);
 
-    // Listas de datos
-    const [transactions, setTransactions] = useState([]);
-    const [workSessions, setWorkSessions] = useState([]);
-    const [filterTab, setFilterTab] = useState('all'); // 'all', 'expense', 'income'
-
-    // Modal de Nueva Transacción
     const [modalVisible, setModalVisible] = useState(false);
-    const [txType, setTxType] = useState('gasto'); // 'gasto' | 'ingreso'
+    const [txType, setTxType] = useState('gasto');
     const [txAmount, setTxAmount] = useState('');
-    const [txCategory, setTxCategory] = useState('comida');
+    const [txCategory, setTxCategory] = useState('Alimentación');
     const [txDescription, setTxDescription] = useState('');
 
-    // Cargar datos consolidados
-    const fetchFinanceData = useCallback(async () => {
-        try {
-            setLoading(true);
-            const { data: { user } } = await supabase.auth.getUser();
-            const currentUserId = user?.id || null;
-            setUserId(currentUserId);
-
-            const now = new Date();
-            const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1).toISOString();
-
-            if (!currentUserId) {
-                // Demo data si no hay sesión iniciada
-                setTransactions([
-                    {
-                        id: 'demo-tx-1',
-                        fecha: new Date(Date.now() - 3600000 * 5).toISOString(),
-                        tipo: 'gasto',
-                        categoria: '🥩 Alimentación',
-                        cantidad: 78.50,
-                        descripcion: 'Compra semanal supermercado (ternera, huevos, arroz)',
-                    },
-                    {
-                        id: 'demo-tx-2',
-                        fecha: new Date(Date.now() - 86400000).toISOString(),
-                        tipo: 'gasto',
-                        categoria: '🖥️ Servidores/Infra',
-                        cantidad: 45.00,
-                        descripcion: 'Hosting Supabase Pro + Dominios',
-                    },
-                    {
-                        id: 'demo-tx-3',
-                        fecha: new Date(Date.now() - 86400000 * 2).toISOString(),
-                        tipo: 'ingreso',
-                        categoria: '💼 Facturación',
-                        cantidad: 1200.00,
-                        descripcion: 'Pago hito cliente consultoría',
-                    },
-                ]);
-
-                setWorkSessions([
-                    {
-                        id: 'demo-wk-1',
-                        fecha: new Date().toISOString().split('T')[0],
-                        hora_inicio: new Date(Date.now() - 3600000 * 4).toISOString(),
-                        hora_fin: new Date().toISOString(),
-                        precio_hora: 45,
-                        ingreso_generado: 180.0,
-                    },
-                ]);
-                return;
-            }
-
-            // 1. Transacciones manuales
-            const { data: txData, error: txError } = await supabase
-                .from('transacciones_economicas')
-                .select('*')
-                .eq('user_id', currentUserId)
-                .gte('fecha', startOfMonth)
-                .order('fecha', { ascending: false });
-
-            if (txError) throw txError;
-            setTransactions(txData || []);
-
-            // 2. Ingresos de jornadas de trabajo
-            const { data: wkData, error: wkError } = await supabase
-                .from('jornadas_trabajo')
-                .select('*')
-                .eq('user_id', currentUserId)
-                .gte('fecha', startOfMonth.split('T')[0])
-                .order('hora_inicio', { ascending: false });
-
-            if (wkError) throw wkError;
-            setWorkSessions(wkData || []);
-
-        } catch (error) {
-            console.error('Error al cargar finanzas:', error.message);
-        } finally {
-            setLoading(false);
-        }
+    useEffect(() => {
+        let mounted = true;
+        getStoreState(true).then((s) => {
+            if (mounted) setStoreState({ ...s });
+        });
+        const unsub = subscribeStore((s) => {
+            if (mounted) setStoreState({ ...s });
+        });
+        return () => {
+            mounted = false;
+            unsub();
+        };
     }, []);
 
-    useEffect(() => {
-        fetchFinanceData();
-    }, [fetchFinanceData]);
+    const monthMetrics = useMemo(() => computePeriodMetrics(storeState, 'mensual'), [storeState]);
 
-    // Guardar nueva transacción manual
-    const handleSaveTransaction = async () => {
-        const amount = parseFloat(txAmount);
-        if (isNaN(amount) || amount <= 0) {
-            Alert.alert('Cantidad requerida', 'Por favor ingresa un importe mayor que 0.');
-            return;
-        }
-
-        const catObject = (txType === 'gasto' ? CATEGORIES_EXPENSE : CATEGORIES_INCOME)
-            .find((c) => c.id === txCategory);
-        const finalCategory = catObject ? catObject.label : txCategory;
-
-        try {
-            setSaving(true);
-            const now = new Date();
-
-            if (userId) {
-                const { data, error } = await supabase
-                    .from('transacciones_economicas')
-                    .insert([
-                        {
-                            user_id: userId,
-                            fecha: now.toISOString(),
-                            tipo: txType,
-                            categoria: finalCategory,
-                            cantidad: amount,
-                            descripcion: txDescription.trim() || finalCategory,
-                        },
-                    ])
-                    .select();
-
-                if (error) throw error;
-                if (data && data.length > 0) {
-                    setTransactions((prev) => [data[0], ...prev]);
-                }
-            } else {
-                const newDemoTx = {
-                    id: `local-tx-${Date.now()}`,
-                    fecha: now.toISOString(),
-                    tipo: txType,
-                    categoria: finalCategory,
-                    cantidad: amount,
-                    descripcion: txDescription.trim() || finalCategory,
-                };
-                setTransactions((prev) => [newDemoTx, ...prev]);
-            }
-
-            setModalVisible(false);
-            setTxAmount('');
-            setTxDescription('');
-            Alert.alert('Registrado', `${txType === 'gasto' ? 'Gasto' : 'Ingreso'} de ${amount} € anotado en el libro contable.`);
-        } catch (error) {
-            Alert.alert('Error', error.message);
-        } finally {
-            setSaving(false);
-        }
-    };
-
-    // Eliminar transacción manual
-    const handleDeleteTx = async (txId) => {
-        Alert.alert(
-            'Eliminar Asiento',
-            '¿Deseas suprimir esta transacción?',
-            [
-                { text: 'Cancelar', style: 'cancel' },
-                {
-                    text: 'Eliminar',
-                    style: 'destructive',
-                    onPress: async () => {
-                        try {
-                            if (userId) {
-                                await supabase
-                                    .from('transacciones_economicas')
-                                    .delete()
-                                    .eq('id', txId);
-                            }
-                            setTransactions((prev) => prev.filter((t) => t.id !== txId));
-                        } catch (err) {
-                            Alert.alert('Error', err.message);
-                        }
-                    },
-                },
-            ]
-        );
-    };
-
-    // Cálculos consolidados del mes
-    const metrics = useMemo(() => {
-        const manualIncome = transactions
-            .filter((t) => t.tipo?.toLowerCase() === 'ingreso')
-            .reduce((acc, t) => acc + (Number(t.cantidad) || 0), 0);
-
-        const workIncome = workSessions
-            .reduce((acc, w) => acc + (Number(w.ingreso_generado) || 0), 0);
-
-        const totalIncome = manualIncome + workIncome;
-
-        const totalExpenses = transactions
-            .filter((t) => t.tipo?.toLowerCase() === 'gasto')
-            .reduce((acc, t) => acc + (Number(t.cantidad) || 0), 0);
-
-        const netBalance = totalIncome - totalExpenses;
-        const savingsRate = totalIncome > 0 ? Math.round((netBalance / totalIncome) * 100) : 0;
-
-        // Gasto en comida
-        const foodExpenses = transactions
-            .filter((t) => t.tipo?.toLowerCase() === 'gasto' && (t.categoria?.includes('Alimentación') || t.categoria?.includes('comida')))
-            .reduce((acc, t) => acc + (Number(t.cantidad) || 0), 0);
-
-        return {
-            manualIncome,
-            workIncome,
-            totalIncome,
-            totalExpenses,
-            netBalance,
-            savingsRate,
-            foodExpenses,
-        };
-    }, [transactions, workSessions]);
-
-    // Combinar lista unificada de transacciones + jornadas de trabajo
     const unifiedFeed = useMemo(() => {
+        if (!storeState) return [];
         const list = [];
 
-        // Añadir transacciones manuales
-        transactions.forEach((tx) => {
+        (storeState.transactions || []).forEach((tx) => {
             list.push({
                 id: tx.id,
                 isAutoWork: false,
                 date: new Date(tx.fecha),
                 type: tx.tipo?.toLowerCase(),
                 category: tx.categoria,
-                amount: Number(tx.cantidad),
+                amount: Number(tx.cantidad || 0),
                 description: tx.descripcion,
             });
         });
 
-        // Añadir jornadas de trabajo como ingresos automáticos
-        workSessions.forEach((wk) => {
+        (storeState.workSessions || []).forEach((wk) => {
             const diffMs = new Date(wk.hora_fin) - new Date(wk.hora_inicio);
-            const hrs = (diffMs / (1000 * 3600)).toFixed(1);
+            const hrs = Math.max(0, diffMs / 3600000).toFixed(1);
             list.push({
-                id: `auto-wk-${wk.id}`,
+                id: `auto-${wk.id}`,
                 isAutoWork: true,
                 date: new Date(wk.hora_inicio || wk.fecha),
                 type: 'ingreso',
-                category: '⏱️ Jornada Facturada',
-                amount: Number(wk.ingreso_generado),
-                description: `Liquidación automática: ${hrs}h a ${wk.precio_hora}€/h`,
+                category: 'Jornada de trabajo',
+                amount: Number(wk.ingreso_generado || 0),
+                description: `${hrs}h a ${wk.precio_hora} €/h`,
             });
         });
 
-        // Ordenar por fecha descendente
         list.sort((a, b) => b.date - a.date);
 
-        // Filtrar según pestaña activa
-        if (filterTab === 'expense') {
-            return list.filter((item) => item.type === 'gasto');
-        }
-        if (filterTab === 'income') {
-            return list.filter((item) => item.type === 'ingreso');
-        }
+        if (filterTab === 'expense') return list.filter((i) => i.type === 'gasto');
+        if (filterTab === 'income') return list.filter((i) => i.type === 'ingreso');
         return list;
-    }, [transactions, workSessions, filterTab]);
+    }, [storeState, filterTab]);
+
+    const handleSaveTx = async () => {
+        const amount = parseFloat(txAmount);
+        if (isNaN(amount) || amount <= 0) {
+            Alert.alert('Cantidad requerida', 'Introduce un importe válido mayor que 0.');
+            return;
+        }
+        try {
+            setSaving(true);
+            await addTransaction({
+                fecha: new Date().toISOString(),
+                tipo: txType,
+                categoria: txCategory,
+                cantidad: amount,
+                descripcion: txDescription.trim() || txCategory,
+            });
+            setModalVisible(false);
+            setTxAmount('');
+            setTxDescription('');
+        } catch (err) {
+            Alert.alert('Error', err.message);
+        } finally {
+            setSaving(false);
+        }
+    };
+
+    const handleDelete = (id) => {
+        Alert.alert('Eliminar movimiento', '¿Quieres borrar este registro?', [
+            { text: 'Cancelar', style: 'cancel' },
+            { text: 'Eliminar', style: 'destructive', onPress: () => deleteTransaction(id) },
+        ]);
+    };
+
+    if (!storeState || !monthMetrics) {
+        return (
+            <View style={styles.loadingWrap}>
+                <ActivityIndicator color="#34D399" />
+            </View>
+        );
+    }
+
+    const { economy } = monthMetrics;
 
     return (
         <View style={styles.container}>
-            <ScrollView contentContainerStyle={styles.scrollContent}>
-                {/* Cabecera */}
-                <View style={styles.header}>
-                    <View>
-                        <Text style={styles.superTitle}>PILAR ECONOMÍA & CAPITAL</Text>
-                        <Text style={styles.mainTitle}>Libro Mayor Ejecutivo</Text>
-                    </View>
-                    <TouchableOpacity
-                        style={styles.newTxBtn}
-                        onPress={() => setModalVisible(true)}
-                    >
-                        <Text style={styles.newTxBtnText}>+ Transacción</Text>
-                    </TouchableOpacity>
-                </View>
-
-                {/* TARJETA DE BALANCE PRINCIPAL */}
-                <View style={styles.balanceCard}>
-                    <View style={styles.balanceHeader}>
-                        <Text style={styles.balanceLabel}>FLUJO DE CAJA NETO (ESTE MES)</Text>
-                        <View style={[
-                            styles.savingsBadge,
-                            { backgroundColor: metrics.savingsRate >= 0 ? 'rgba(16, 185, 129, 0.15)' : 'rgba(239, 68, 68, 0.15)' }
-                        ]}>
-                            <Text style={[
-                                styles.savingsBadgeText,
-                                { color: metrics.savingsRate >= 0 ? '#34d399' : '#f87171' }
-                            ]}>
-                                {metrics.savingsRate >= 0 ? `+${metrics.savingsRate}% Ahorro` : 'Déficit'}
-                            </Text>
-                        </View>
+            <ScrollView
+                contentContainerStyle={styles.scrollContent}
+                showsVerticalScrollIndicator={false}
+            >
+                <View style={styles.innerWrap}>
+                    {/* Cabecera limpia */}
+                    <View style={styles.topNav}>
+                        {onNavigate && (
+                            <TouchableOpacity
+                                style={styles.backBtn}
+                                onPress={() => onNavigate('dashboard')}
+                            >
+                                <Text style={styles.backBtnText}>← Inicio</Text>
+                            </TouchableOpacity>
+                        )}
+                        <TouchableOpacity
+                            style={styles.newBtn}
+                            onPress={() => setModalVisible(true)}
+                        >
+                            <Text style={styles.newBtnText}>+ Nuevo movimiento</Text>
+                        </TouchableOpacity>
                     </View>
 
-                    <Text style={[
-                        styles.balanceAmount,
-                        { color: metrics.netBalance >= 0 ? '#10b981' : '#ef4444' }
-                    ]}>
-                        {metrics.netBalance >= 0 ? '+' : ''}{metrics.netBalance.toLocaleString('es-ES')} €
+                    <Text style={styles.title}>Economía</Text>
+                    <Text style={styles.subtitle}>
+                        Tus ingresos de trabajo y tus gastos del mes en un solo lugar.
                     </Text>
 
-                    <View style={styles.cardDivider} />
-
-                    <View style={styles.incomeExpenseRow}>
-                        <View style={styles.subStatBox}>
-                            <Text style={styles.subStatLabel}>Ingresos Consolidados</Text>
-                            <Text style={styles.subStatIncome}>
-                                +{metrics.totalIncome.toLocaleString('es-ES')} €
-                            </Text>
-                            <Text style={styles.microWorkNote}>
-                                ⏱️ {metrics.workIncome.toLocaleString('es-ES')} € de jornadas
-                            </Text>
-                        </View>
-
-                        <View style={styles.subStatDivider} />
-
-                        <View style={styles.subStatBox}>
-                            <Text style={styles.subStatLabel}>Gastos Consolidados</Text>
-                            <Text style={styles.subStatExpense}>
-                                -{metrics.totalExpenses.toLocaleString('es-ES')} €
-                            </Text>
-                            <Text style={styles.microFoodNote}>
-                                🥩 {metrics.foodExpenses.toLocaleString('es-ES')} € en comida
-                            </Text>
-                        </View>
-                    </View>
-                </View>
-
-                {/* Pestañas de Filtrado */}
-                <View style={styles.filterTabsRow}>
-                    {[
-                        { id: 'all', label: 'Todos' },
-                        { id: 'income', label: 'Ingresos' },
-                        { id: 'expense', label: 'Gastos' },
-                    ].map((tab) => (
-                        <TouchableOpacity
-                            key={tab.id}
-                            style={[
-                                styles.filterTab,
-                                filterTab === tab.id && styles.filterTabActive,
-                            ]}
-                            onPress={() => setFilterTab(tab.id)}
-                        >
+                    {/* Tarjeta Balance */}
+                    <View style={styles.balanceCard}>
+                        <View style={styles.balanceTop}>
+                            <Text style={styles.balanceLabel}>Balance neto este mes</Text>
                             <Text
                                 style={[
-                                    styles.filterTabText,
-                                    filterTab === tab.id && styles.filterTabTextActive,
+                                    styles.savingsBadge,
+                                    { color: economy.savingsRate >= 0 ? '#34D399' : '#FB7185' },
                                 ]}
                             >
-                                {tab.label}
+                                {economy.savingsRate >= 0 ? `${economy.savingsRate}% ahorro` : 'Déficit'}
                             </Text>
-                        </TouchableOpacity>
-                    ))}
-                </View>
+                        </View>
 
-                {/* LISTA UNIFICADA DE MOVIMIENTOS */}
-                <View style={styles.feedSection}>
-                    {loading ? (
-                        <ActivityIndicator color="#10b981" style={{ marginTop: 20 }} />
-                    ) : unifiedFeed.length === 0 ? (
+                        <Text
+                            style={[
+                                styles.balanceValue,
+                                { color: economy.netBalance >= 0 ? '#34D399' : '#FB7185' },
+                            ]}
+                        >
+                            {economy.netBalance >= 0 ? '+' : ''}
+                            {economy.netBalance.toLocaleString('es-ES')} €
+                        </Text>
+
+                        <View style={styles.divider} />
+
+                        <View style={styles.splitRow}>
+                            <View style={styles.splitCol}>
+                                <Text style={styles.splitLabel}>Ingresos</Text>
+                                <Text style={[styles.splitValue, { color: '#34D399' }]}>
+                                    +{economy.totalIncome.toLocaleString('es-ES')} €
+                                </Text>
+                                <Text style={styles.splitSub}>
+                                    {economy.workIncome} € de jornadas
+                                </Text>
+                            </View>
+                            <View style={styles.vDivider} />
+                            <View style={styles.splitCol}>
+                                <Text style={styles.splitLabel}>Gastos</Text>
+                                <Text style={[styles.splitValue, { color: '#FB7185' }]}>
+                                    -{economy.expenses.toLocaleString('es-ES')} €
+                                </Text>
+                                <Text style={styles.splitSub}>
+                                    {economy.foodExpenses} € en comida
+                                </Text>
+                            </View>
+                        </View>
+                    </View>
+
+                    {/* Filtros */}
+                    <View style={styles.filterRow}>
+                        {[
+                            { id: 'all', label: 'Todos' },
+                            { id: 'income', label: 'Ingresos' },
+                            { id: 'expense', label: 'Gastos' },
+                        ].map((t) => (
+                            <TouchableOpacity
+                                key={t.id}
+                                style={[styles.filterBtn, filterTab === t.id && styles.filterBtnActive]}
+                                onPress={() => setFilterTab(t.id)}
+                            >
+                                <Text
+                                    style={[
+                                        styles.filterText,
+                                        filterTab === t.id && styles.filterTextActive,
+                                    ]}
+                                >
+                                    {t.label}
+                                </Text>
+                            </TouchableOpacity>
+                        ))}
+                    </View>
+
+                    {/* Listado */}
+                    {unifiedFeed.length === 0 ? (
                         <View style={styles.emptyCard}>
-                            <Text style={styles.emptyCardText}>No hay movimientos registrados.</Text>
-                            <Text style={styles.emptyCardSub}>
-                                Añade gastos o inicia jornadas para ver tu flujo de caja en tiempo real.
-                            </Text>
+                            <Text style={styles.emptyText}>No hay movimientos registrados.</Text>
                         </View>
                     ) : (
                         unifiedFeed.map((item) => {
-                            const isIncome = item.type === 'ingreso';
-                            let dateStr = 'Hoy';
+                            const isInc = item.type === 'ingreso';
+                            let dateStr = '';
                             try {
                                 dateStr = item.date.toLocaleDateString('es-ES', {
                                     day: '2-digit',
                                     month: 'short',
                                 });
-                            } catch (e) {
-                                dateStr = item.date ? item.date.toISOString().slice(5, 10) : 'Hoy';
+                            } catch {
+                                dateStr = 'Hoy';
                             }
 
                             return (
-                                <View key={item.id} style={styles.feedCard}>
-                                    <View style={styles.feedLeft}>
-                                        <View style={styles.feedHeaderRow}>
-                                            <Text style={styles.feedCategory}>{item.category}</Text>
-                                            {item.isAutoWork && (
-                                                <View style={styles.autoWorkBadge}>
-                                                    <Text style={styles.autoWorkBadgeText}>AUTO-JORNADA</Text>
-                                                </View>
-                                            )}
-                                        </View>
-                                        <Text style={styles.feedDescription} numberOfLines={1}>
+                                <View key={item.id} style={styles.txCard}>
+                                    <View style={{ flex: 1, marginRight: 10 }}>
+                                        <Text style={styles.txCategory}>{item.category}</Text>
+                                        <Text style={styles.txDesc} numberOfLines={1}>
                                             {item.description}
                                         </Text>
-                                        <Text style={styles.feedDate}>{dateStr}</Text>
+                                        <Text style={styles.txDate}>{dateStr}</Text>
                                     </View>
-
-                                    <View style={styles.feedRight}>
-                                        <Text style={[
-                                            styles.feedAmount,
-                                            { color: isIncome ? '#10b981' : '#ef4444' }
-                                        ]}>
-                                            {isIncome ? '+' : '-'}{item.amount.toLocaleString('es-ES')} €
+                                    <View style={styles.txRight}>
+                                        <Text
+                                            style={[
+                                                styles.txAmount,
+                                                { color: isInc ? '#34D399' : '#FB7185' },
+                                            ]}
+                                        >
+                                            {isInc ? '+' : '-'}
+                                            {item.amount.toLocaleString('es-ES')} €
                                         </Text>
                                         {!item.isAutoWork && (
                                             <TouchableOpacity
-                                                onPress={() => handleDeleteTx(item.id)}
-                                                style={styles.feedDeleteBtn}
+                                                style={styles.deleteBtn}
+                                                onPress={() => handleDelete(item.id)}
                                             >
-                                                <Text style={styles.feedDeleteText}>✕</Text>
+                                                <Text style={styles.deleteText}>✕</Text>
                                             </TouchableOpacity>
                                         )}
                                     </View>
@@ -453,7 +294,7 @@ export default function FinanceScreen({ onNavigate }) {
                 </View>
             </ScrollView>
 
-            {/* MODAL NUEVA TRANSACCIÓN */}
+            {/* Modal */}
             <Modal
                 visible={modalVisible}
                 transparent
@@ -462,117 +303,103 @@ export default function FinanceScreen({ onNavigate }) {
             >
                 <View style={styles.modalOverlay}>
                     <View style={styles.modalCard}>
-                        <Text style={styles.modalTitle}>Nuevo Movimiento</Text>
-                        <Text style={styles.modalSub}>
-                            Registra entradas y salidas de capital para auditoría inmediata.
-                        </Text>
+                        <Text style={styles.modalTitle}>Nuevo movimiento</Text>
 
-                        {/* Switch Tipo: Gasto / Ingreso */}
-                        <View style={styles.typeSwitchRow}>
+                        <View style={styles.typeRow}>
                             <TouchableOpacity
-                                style={[
-                                    styles.typeSwitchBtn,
-                                    txType === 'gasto' && styles.typeSwitchBtnExpense,
-                                ]}
+                                style={[styles.typeBtn, txType === 'gasto' && styles.typeBtnExpense]}
                                 onPress={() => {
                                     setTxType('gasto');
-                                    setTxCategory('comida');
+                                    setTxCategory('Alimentación');
                                 }}
                             >
-                                <Text style={[
-                                    styles.typeSwitchText,
-                                    txType === 'gasto' && styles.typeSwitchTextActive
-                                ]}>
-                                    - Gasto
+                                <Text
+                                    style={[
+                                        styles.typeBtnText,
+                                        txType === 'gasto' && styles.typeBtnTextActive,
+                                    ]}
+                                >
+                                    Gasto
                                 </Text>
                             </TouchableOpacity>
 
                             <TouchableOpacity
-                                style={[
-                                    styles.typeSwitchBtn,
-                                    txType === 'ingreso' && styles.typeSwitchBtnIncome,
-                                ]}
+                                style={[styles.typeBtn, txType === 'ingreso' && styles.typeBtnIncome]}
                                 onPress={() => {
                                     setTxType('ingreso');
-                                    setTxCategory('facturacion');
+                                    setTxCategory('Facturación');
                                 }}
                             >
-                                <Text style={[
-                                    styles.typeSwitchText,
-                                    txType === 'ingreso' && styles.typeSwitchTextActive
-                                ]}>
-                                    + Ingreso Extra
+                                <Text
+                                    style={[
+                                        styles.typeBtnText,
+                                        txType === 'ingreso' && styles.typeBtnTextActive,
+                                    ]}
+                                >
+                                    Ingreso
                                 </Text>
                             </TouchableOpacity>
                         </View>
 
-                        {/* Importe */}
-                        <Text style={styles.inputLabel}>CANTIDAD (€)</Text>
+                        <Text style={styles.inputLabel}>Importe (€)</Text>
                         <TextInput
-                            style={styles.modalInputLarge}
+                            style={styles.modalInput}
                             keyboardType="numeric"
                             placeholder="0.00"
-                            placeholderTextColor="#52525b"
+                            placeholderTextColor="#52525B"
                             value={txAmount}
                             onChangeText={setTxAmount}
                         />
 
-                        {/* Selector de Categorías */}
-                        <Text style={styles.inputLabel}>CATEGORÍA</Text>
+                        <Text style={styles.inputLabel}>Categoría</Text>
                         <ScrollView
                             horizontal
                             showsHorizontalScrollIndicator={false}
-                            contentContainerStyle={styles.categoryPillsRow}
+                            contentContainerStyle={styles.catRow}
                         >
-                            {(txType === 'gasto' ? CATEGORIES_EXPENSE : CATEGORIES_INCOME).map((cat) => (
+                            {(txType === 'gasto' ? CATEGORIES_EXPENSE : CATEGORIES_INCOME).map((c) => (
                                 <TouchableOpacity
-                                    key={cat.id}
-                                    style={[
-                                        styles.categoryPill,
-                                        txCategory === cat.id && styles.categoryPillActive,
-                                    ]}
-                                    onPress={() => setTxCategory(cat.id)}
+                                    key={c.id}
+                                    style={[styles.catPill, txCategory === c.id && styles.catPillActive]}
+                                    onPress={() => setTxCategory(c.id)}
                                 >
-                                    <Text style={[
-                                        styles.categoryPillText,
-                                        txCategory === cat.id && styles.categoryPillTextActive,
-                                    ]}>
-                                        {cat.label}
+                                    <Text
+                                        style={[
+                                            styles.catText,
+                                            txCategory === c.id && styles.catTextActive,
+                                        ]}
+                                    >
+                                        {c.label}
                                     </Text>
                                 </TouchableOpacity>
                             ))}
                         </ScrollView>
 
-                        {/* Descripción */}
-                        <Text style={styles.inputLabel}>DESCRIPCIÓN / CONCEPTO</Text>
+                        <Text style={styles.inputLabel}>Descripción</Text>
                         <TextInput
                             style={styles.modalInput}
-                            placeholder="Ej. Compra carne y huevos, hosting AWS..."
-                            placeholderTextColor="#52525b"
+                            placeholder="Ej. Compra semanal"
+                            placeholderTextColor="#52525B"
                             value={txDescription}
                             onChangeText={setTxDescription}
                         />
 
-                        {/* Botones de Acción */}
                         <View style={styles.modalActions}>
                             <TouchableOpacity
                                 style={styles.modalCancelBtn}
                                 onPress={() => setModalVisible(false)}
                             >
-                                <Text style={styles.modalCancelBtnText}>Cancelar</Text>
+                                <Text style={styles.modalCancelText}>Cancelar</Text>
                             </TouchableOpacity>
                             <TouchableOpacity
-                                style={[
-                                    styles.modalConfirmBtn,
-                                    { backgroundColor: txType === 'gasto' ? '#ef4444' : '#10b981' }
-                                ]}
-                                onPress={handleSaveTransaction}
+                                style={styles.modalConfirmBtn}
+                                onPress={handleSaveTx}
                                 disabled={saving}
                             >
                                 {saving ? (
-                                    <ActivityIndicator color="#ffffff" />
+                                    <ActivityIndicator color="#000000" />
                                 ) : (
-                                    <Text style={styles.modalConfirmBtnText}>Registrar</Text>
+                                    <Text style={styles.modalConfirmText}>Guardar</Text>
                                 )}
                             </TouchableOpacity>
                         </View>
@@ -584,389 +411,157 @@ export default function FinanceScreen({ onNavigate }) {
 }
 
 const styles = StyleSheet.create({
-    container: {
-        flex: 1,
-        backgroundColor: '#000000',
-    },
-    scrollContent: {
-        paddingHorizontal: 16,
-        paddingTop: 20,
-        paddingBottom: 48,
-    },
-    header: {
+    container: { flex: 1, backgroundColor: '#000000' },
+    loadingWrap: { flex: 1, backgroundColor: '#000000', justifyContent: 'center', alignItems: 'center' },
+    scrollContent: { paddingHorizontal: 20, paddingTop: 14, paddingBottom: 40 },
+    innerWrap: { width: '100%', maxWidth: 520, alignSelf: 'center' },
+    topNav: {
         flexDirection: 'row',
         justifyContent: 'space-between',
         alignItems: 'center',
-        marginBottom: 16,
+        marginBottom: 12,
     },
-    superTitle: {
-        color: '#10b981',
-        fontSize: 10,
-        fontWeight: '800',
-        letterSpacing: 1.2,
-    },
-    mainTitle: {
-        color: '#f4f4f5',
-        fontSize: 22,
-        fontWeight: '900',
-        letterSpacing: -0.5,
-        marginTop: 2,
-    },
-    newTxBtn: {
-        backgroundColor: '#121216',
-        paddingHorizontal: 14,
+    backBtn: { paddingVertical: 6, paddingRight: 12 },
+    backBtnText: { color: '#A1A1AA', fontSize: 14, fontWeight: '600' },
+    newBtn: {
+        backgroundColor: '#111114',
+        paddingHorizontal: 12,
         paddingVertical: 7,
-        borderRadius: 8,
+        borderRadius: 10,
         borderWidth: 1,
-        borderColor: '#27272a',
+        borderColor: '#232329',
     },
-    newTxBtnText: {
-        color: '#34d399',
-        fontSize: 12,
-        fontWeight: '700',
-    },
-
-    // Tarjeta de Balance
+    newBtnText: { color: '#34D399', fontSize: 12, fontWeight: '600' },
+    title: { color: '#FAFAFA', fontSize: 26, fontWeight: '700', letterSpacing: -0.5 },
+    subtitle: { color: '#A1A1AA', fontSize: 13, marginTop: 4, marginBottom: 18, lineHeight: 18 },
     balanceCard: {
-        backgroundColor: '#0a0a0c',
+        backgroundColor: '#111114',
         borderRadius: 20,
-        padding: 20,
+        padding: 18,
         borderWidth: 1,
-        borderColor: 'rgba(16, 185, 129, 0.3)',
-        marginBottom: 20,
+        borderColor: '#232329',
+        marginBottom: 18,
     },
-    balanceHeader: {
+    balanceTop: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+    balanceLabel: { color: '#A1A1AA', fontSize: 13 },
+    savingsBadge: { fontSize: 12, fontWeight: '700' },
+    balanceValue: { fontSize: 32, fontWeight: '700', marginTop: 4 },
+    divider: { height: 1, backgroundColor: '#232329', marginVertical: 14 },
+    splitRow: { flexDirection: 'row' },
+    splitCol: { flex: 1 },
+    vDivider: { width: 1, backgroundColor: '#232329', marginHorizontal: 12 },
+    splitLabel: { color: '#71717A', fontSize: 12, marginBottom: 2 },
+    splitValue: { fontSize: 16, fontWeight: '700' },
+    splitSub: { color: '#71717A', fontSize: 11, marginTop: 2 },
+    filterRow: { flexDirection: 'row', gap: 8, marginBottom: 14 },
+    filterBtn: {
+        paddingVertical: 7,
+        paddingHorizontal: 14,
+        borderRadius: 20,
+        backgroundColor: '#111114',
+        borderWidth: 1,
+        borderColor: '#232329',
+    },
+    filterBtnActive: { backgroundColor: '#FAFAFA', borderColor: '#FAFAFA' },
+    filterText: { color: '#A1A1AA', fontSize: 12, fontWeight: '600' },
+    filterTextActive: { color: '#000000', fontWeight: '700' },
+    txCard: {
         flexDirection: 'row',
         justifyContent: 'space-between',
         alignItems: 'center',
-        marginBottom: 6,
-    },
-    balanceLabel: {
-        color: '#71717a',
-        fontSize: 10,
-        fontWeight: '800',
-        letterSpacing: 1,
-    },
-    savingsBadge: {
-        paddingHorizontal: 8,
-        paddingVertical: 4,
-        borderRadius: 8,
-        borderWidth: 1,
-        borderColor: 'rgba(16, 185, 129, 0.3)',
-    },
-    savingsBadgeText: {
-        fontSize: 11,
-        fontWeight: '800',
-    },
-    balanceAmount: {
-        fontSize: 36,
-        fontWeight: '900',
-        letterSpacing: -1,
-        marginVertical: 4,
-    },
-    cardDivider: {
-        height: 1,
-        backgroundColor: '#1f1f23',
-        marginVertical: 14,
-    },
-    incomeExpenseRow: {
-        flexDirection: 'row',
-        justifyContent: 'space-between',
-    },
-    subStatBox: {
-        flex: 1,
-    },
-    subStatDivider: {
-        width: 1,
-        backgroundColor: '#1f1f23',
-        marginHorizontal: 12,
-    },
-    subStatLabel: {
-        color: '#a1a1aa',
-        fontSize: 11,
-        fontWeight: '500',
-        marginBottom: 2,
-    },
-    subStatIncome: {
-        color: '#10b981',
-        fontSize: 17,
-        fontWeight: '800',
-    },
-    subStatExpense: {
-        color: '#ef4444',
-        fontSize: 17,
-        fontWeight: '800',
-    },
-    microWorkNote: {
-        color: '#06b6d4',
-        fontSize: 10,
-        fontWeight: '600',
-        marginTop: 2,
-    },
-    microFoodNote: {
-        color: '#fbbf24',
-        fontSize: 10,
-        fontWeight: '600',
-        marginTop: 2,
-    },
-
-    // Filtros
-    filterTabsRow: {
-        flexDirection: 'row',
-        gap: 8,
-        marginBottom: 16,
-    },
-    filterTab: {
-        paddingVertical: 6,
-        paddingHorizontal: 16,
-        borderRadius: 8,
-        backgroundColor: '#0f0f12',
-        borderWidth: 1,
-        borderColor: '#1f1f23',
-    },
-    filterTabActive: {
-        backgroundColor: '#1c1c24',
-        borderColor: '#3f3f46',
-    },
-    filterTabText: {
-        color: '#71717a',
-        fontSize: 12,
-        fontWeight: '600',
-    },
-    filterTabTextActive: {
-        color: '#ffffff',
-        fontWeight: '800',
-    },
-
-    // Feed de Transacciones
-    feedSection: {
-        gap: 10,
-    },
-    feedCard: {
-        flexDirection: 'row',
-        justifyContent: 'space-between',
-        alignItems: 'center',
-        backgroundColor: '#0a0a0c',
-        borderRadius: 14,
+        backgroundColor: '#111114',
+        borderRadius: 16,
         padding: 14,
         borderWidth: 1,
-        borderColor: '#1f1f23',
+        borderColor: '#232329',
+        marginBottom: 10,
     },
-    feedLeft: {
-        flex: 1,
-        marginRight: 10,
-    },
-    feedHeaderRow: {
-        flexDirection: 'row',
-        alignItems: 'center',
-        gap: 8,
-        marginBottom: 2,
-    },
-    feedCategory: {
-        color: '#f4f4f5',
-        fontSize: 13,
-        fontWeight: '700',
-    },
-    autoWorkBadge: {
-        backgroundColor: 'rgba(6, 182, 212, 0.15)',
-        paddingHorizontal: 6,
-        paddingVertical: 2,
-        borderRadius: 4,
-        borderWidth: 1,
-        borderColor: 'rgba(6, 182, 212, 0.3)',
-    },
-    autoWorkBadgeText: {
-        color: '#06b6d4',
-        fontSize: 8,
-        fontWeight: '800',
-    },
-    feedDescription: {
-        color: '#a1a1aa',
-        fontSize: 12,
-        marginTop: 2,
-    },
-    feedDate: {
-        color: '#52525b',
-        fontSize: 10,
-        marginTop: 4,
-    },
-    feedRight: {
-        alignItems: 'flex-end',
-        gap: 4,
-    },
-    feedAmount: {
-        fontSize: 16,
-        fontWeight: '900',
-    },
-    feedDeleteBtn: {
-        padding: 4,
-    },
-    feedDeleteText: {
-        color: '#52525b',
-        fontSize: 13,
-        fontWeight: '700',
-    },
+    txCategory: { color: '#FAFAFA', fontSize: 14, fontWeight: '600' },
+    txDesc: { color: '#A1A1AA', fontSize: 12, marginTop: 2 },
+    txDate: { color: '#71717A', fontSize: 11, marginTop: 4 },
+    txRight: { alignItems: 'flex-end', gap: 4 },
+    txAmount: { fontSize: 15, fontWeight: '700' },
+    deleteBtn: { padding: 4 },
+    deleteText: { color: '#52525B', fontSize: 13, fontWeight: '700' },
     emptyCard: {
-        backgroundColor: '#0a0a0c',
-        borderRadius: 14,
-        padding: 24,
+        backgroundColor: '#111114',
+        borderRadius: 16,
+        padding: 20,
         alignItems: 'center',
         borderWidth: 1,
-        borderColor: '#1f1f23',
+        borderColor: '#232329',
     },
-    emptyCardText: {
-        color: '#a1a1aa',
-        fontSize: 14,
-        fontWeight: '600',
-    },
-    emptyCardSub: {
-        color: '#52525b',
-        fontSize: 12,
-        marginTop: 4,
-        textAlign: 'center',
-    },
-
-    // Modal
+    emptyText: { color: '#71717A', fontSize: 13 },
     modalOverlay: {
         flex: 1,
-        backgroundColor: 'rgba(0,0,0,0.85)',
+        backgroundColor: 'rgba(0,0,0,0.8)',
         justifyContent: 'center',
         alignItems: 'center',
         padding: 20,
     },
     modalCard: {
-        backgroundColor: '#101014',
-        borderRadius: 18,
+        backgroundColor: '#111114',
+        borderRadius: 20,
         padding: 20,
         width: '100%',
         maxWidth: 380,
         borderWidth: 1,
-        borderColor: '#27272a',
+        borderColor: '#27272E',
     },
-    modalTitle: {
-        color: '#ffffff',
-        fontSize: 18,
-        fontWeight: '800',
-        marginBottom: 4,
-    },
-    modalSub: {
-        color: '#a1a1aa',
-        fontSize: 12,
-        marginBottom: 16,
-        lineHeight: 16,
-    },
-    typeSwitchRow: {
-        flexDirection: 'row',
-        gap: 10,
-        marginBottom: 16,
-    },
-    typeSwitchBtn: {
+    modalTitle: { color: '#FAFAFA', fontSize: 18, fontWeight: '700', marginBottom: 14 },
+    typeRow: { flexDirection: 'row', gap: 10, marginBottom: 14 },
+    typeBtn: {
         flex: 1,
         paddingVertical: 10,
         borderRadius: 10,
-        backgroundColor: '#18181b',
+        backgroundColor: '#18181C',
         alignItems: 'center',
         borderWidth: 1,
-        borderColor: '#27272a',
+        borderColor: '#27272E',
     },
-    typeSwitchBtnExpense: {
-        backgroundColor: 'rgba(239, 68, 68, 0.2)',
-        borderColor: '#ef4444',
-    },
-    typeSwitchBtnIncome: {
-        backgroundColor: 'rgba(16, 185, 129, 0.2)',
-        borderColor: '#10b981',
-    },
-    typeSwitchText: {
-        color: '#71717a',
-        fontSize: 13,
-        fontWeight: '700',
-    },
-    typeSwitchTextActive: {
-        color: '#ffffff',
-        fontWeight: '900',
-    },
-    inputLabel: {
-        color: '#71717a',
-        fontSize: 10,
-        fontWeight: '800',
-        letterSpacing: 0.8,
-        marginBottom: 6,
-    },
-    modalInputLarge: {
-        backgroundColor: '#18181b',
-        borderRadius: 10,
-        paddingHorizontal: 14,
-        paddingVertical: 10,
-        color: '#ffffff',
-        fontSize: 22,
-        fontWeight: '900',
-        borderWidth: 1,
-        borderColor: '#27272a',
-        marginBottom: 14,
-    },
-    categoryPillsRow: {
-        gap: 8,
-        marginBottom: 14,
-    },
-    categoryPill: {
-        paddingVertical: 6,
-        paddingHorizontal: 12,
-        borderRadius: 8,
-        backgroundColor: '#18181b',
-        borderWidth: 1,
-        borderColor: '#27272a',
-    },
-    categoryPillActive: {
-        backgroundColor: '#27272a',
-        borderColor: '#52525b',
-    },
-    categoryPillText: {
-        color: '#71717a',
-        fontSize: 11,
-        fontWeight: '600',
-    },
-    categoryPillTextActive: {
-        color: '#ffffff',
-        fontWeight: '800',
-    },
+    typeBtnExpense: { backgroundColor: 'rgba(251, 113, 133, 0.16)', borderColor: '#FB7185' },
+    typeBtnIncome: { backgroundColor: 'rgba(52, 211, 153, 0.16)', borderColor: '#34D399' },
+    typeBtnText: { color: '#A1A1AA', fontSize: 13, fontWeight: '600' },
+    typeBtnTextActive: { color: '#FAFAFA', fontWeight: '700' },
+    inputLabel: { color: '#A1A1AA', fontSize: 12, marginBottom: 6 },
     modalInput: {
-        backgroundColor: '#18181b',
-        borderRadius: 10,
+        backgroundColor: '#18181C',
+        borderRadius: 12,
         paddingHorizontal: 14,
-        paddingVertical: 10,
-        color: '#ffffff',
-        fontSize: 14,
+        paddingVertical: 11,
+        color: '#FAFAFA',
+        fontSize: 15,
         borderWidth: 1,
-        borderColor: '#27272a',
-        marginBottom: 16,
+        borderColor: '#27272E',
+        marginBottom: 14,
     },
-    modalActions: {
-        flexDirection: 'row',
-        gap: 10,
+    catRow: { gap: 8, marginBottom: 14 },
+    catPill: {
+        paddingVertical: 7,
+        paddingHorizontal: 12,
+        borderRadius: 10,
+        backgroundColor: '#18181C',
+        borderWidth: 1,
+        borderColor: '#27272E',
     },
+    catPillActive: { backgroundColor: '#27272E', borderColor: '#52525B' },
+    catText: { color: '#A1A1AA', fontSize: 12 },
+    catTextActive: { color: '#FAFAFA', fontWeight: '600' },
+    modalActions: { flexDirection: 'row', gap: 10, marginTop: 4 },
     modalCancelBtn: {
         flex: 1,
-        backgroundColor: '#1c1c20',
-        borderRadius: 10,
+        backgroundColor: '#18181C',
+        borderRadius: 12,
         paddingVertical: 12,
         alignItems: 'center',
     },
-    modalCancelBtnText: {
-        color: '#a1a1aa',
-        fontSize: 13,
-        fontWeight: '700',
-    },
+    modalCancelText: { color: '#A1A1AA', fontSize: 14, fontWeight: '600' },
     modalConfirmBtn: {
         flex: 1,
-        borderRadius: 10,
+        backgroundColor: '#FAFAFA',
+        borderRadius: 12,
         paddingVertical: 12,
         alignItems: 'center',
     },
-    modalConfirmBtnText: {
-        color: '#ffffff',
-        fontSize: 13,
-        fontWeight: '900',
-    },
+    modalConfirmText: { color: '#000000', fontSize: 14, fontWeight: '700' },
 });
-

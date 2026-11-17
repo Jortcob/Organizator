@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import {
     View,
     Text,
@@ -10,30 +10,95 @@ import {
     ActivityIndicator,
     Modal,
 } from 'react-native';
-import { supabase } from './supabase';
+import {
+    getStoreState,
+    subscribeStore,
+    addWorkSession,
+    deleteWorkSession,
+} from './dataStore';
+
+function parseHHMMToMinutes(hhmm) {
+    if (!hhmm || !String(hhmm).includes(':')) return null;
+    const parts = String(hhmm).trim().split(':');
+    const h = parseInt(parts[0], 10);
+    const m = parseInt(parts[1], 10);
+    if (isNaN(h) || isNaN(m) || h < 0 || h > 23 || m < 0 || m > 59) return null;
+    return h * 60 + m;
+}
+
+function calcSpanMinutes(startStr, endStr) {
+    const s = parseHHMMToMinutes(startStr);
+    const e = parseHHMMToMinutes(endStr);
+    if (s === null || e === null) return 0;
+    if (e >= s) return e - s;
+    return 1440 - s + e;
+}
 
 export default function WorkScreen({ onNavigate }) {
-    // Estado del temporizador en vivo
-    const [isTimerRunning, setIsTimerRunning] = useState(false);
-    const [secondsElapsed, setSecondsElapsed] = useState(0);
-    const [sessionStartTime, setSessionStartTime] = useState(null);
-    const [hourlyRate, setHourlyRate] = useState('45'); // Tarifa predeterminada €/h
+    const todayDefault = new Date().toISOString().split('T')[0];
 
-    // Sesiones y Métricas
+    const [isTimerRunning, setIsTimerRunning] = useState(false);
+    const [isOnBreak, setIsOnBreak] = useState(false);
+    const [secondsElapsed, setSecondsElapsed] = useState(0);
+    const [breakSeconds, setBreakSeconds] = useState(0);
+    const [sessionStartTime, setSessionStartTime] = useState(null);
+    const [hourlyRate, setHourlyRate] = useState('45');
+    const [liveNote, setLiveNote] = useState('');
+
     const [sessions, setSessions] = useState([]);
     const [loading, setLoading] = useState(true);
     const [saving, setSaving] = useState(false);
-    const [userId, setUserId] = useState(null);
 
-    // Modal de Registro Manual
+    // Modal completo de jornada
     const [manualModalVisible, setManualModalVisible] = useState(false);
-    const [manualHours, setManualHours] = useState('');
+    const [manualDate, setManualDate] = useState(todayDefault);
+    const [isSplitShift, setIsSplitShift] = useState(false);
+    const [t1Start, setT1Start] = useState('09:00');
+    const [t1End, setT1End] = useState('14:00');
+    const [t2Start, setT2Start] = useState('15:30');
+    const [t2End, setT2End] = useState('18:30');
+    const [breakMinutesInput, setBreakMinutesInput] = useState('15');
     const [manualRate, setManualRate] = useState('45');
-    const [manualDescription, setManualDescription] = useState('');
+    const [extraHoursInput, setExtraHoursInput] = useState('0');
+    const [extraRateInput, setExtraRateInput] = useState('60');
+    const [manualNote, setManualNote] = useState('');
 
     const timerRef = useRef(null);
 
-    // Formatear segundos a HH:MM:SS
+    useEffect(() => {
+        let mounted = true;
+        getStoreState(true).then((s) => {
+            if (mounted) {
+                setSessions(s.workSessions || []);
+                setLoading(false);
+            }
+        });
+        const unsub = subscribeStore((s) => {
+            if (mounted) setSessions([...(s.workSessions || [])]);
+        });
+        return () => {
+            mounted = false;
+            unsub();
+        };
+    }, []);
+
+    useEffect(() => {
+        if (isTimerRunning) {
+            timerRef.current = setInterval(() => {
+                if (isOnBreak) {
+                    setBreakSeconds((prev) => prev + 1);
+                } else {
+                    setSecondsElapsed((prev) => prev + 1);
+                }
+            }, 1000);
+        } else if (timerRef.current) {
+            clearInterval(timerRef.current);
+        }
+        return () => {
+            if (timerRef.current) clearInterval(timerRef.current);
+        };
+    }, [isTimerRunning, isOnBreak]);
+
     const formatTime = (totalSeconds) => {
         const hrs = Math.floor(totalSeconds / 3600);
         const mins = Math.floor((totalSeconds % 3600) / 60);
@@ -41,96 +106,101 @@ export default function WorkScreen({ onNavigate }) {
         return `${String(hrs).padStart(2, '0')}:${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
     };
 
-    // Dinero devengado en tiempo real durante la sesión activa
-    const liveEarnings = useMemoFormula(secondsElapsed, hourlyRate);
+    const liveEarnings = useMemo(() => {
+        const numRate = parseFloat(hourlyRate) || 0;
+        return ((secondsElapsed / 3600) * numRate).toFixed(2);
+    }, [secondsElapsed, hourlyRate]);
 
-    function useMemoFormula(seconds, rate) {
-        const numRate = parseFloat(rate) || 0;
-        const hours = seconds / 3600;
-        return (hours * numRate).toFixed(2);
-    }
+    // Cálculo en vivo del formulario manual
+    const manualPreview = useMemo(() => {
+        const m1 = calcSpanMinutes(t1Start, t1End);
+        const m2 = isSplitShift ? calcSpanMinutes(t2Start, t2End) : 0;
+        const breakM = Math.max(0, parseInt(breakMinutesInput, 10) || 0);
+        const netMinutes = Math.max(0, m1 + m2 - breakM);
+        const netHours = netMinutes / 60;
 
-    // Efecto del cronómetro
-    useEffect(() => {
-        if (isTimerRunning) {
-            timerRef.current = setInterval(() => {
-                setSecondsElapsed((prev) => prev + 1);
-            }, 1000);
-        } else {
-            if (timerRef.current) clearInterval(timerRef.current);
-        }
+        const rate = Math.max(0, parseFloat(manualRate) || 0);
+        const extraHrs = Math.max(0, parseFloat(extraHoursInput) || 0);
+        const extraRate = Math.max(0, parseFloat(extraRateInput) || rate);
 
-        return () => {
-            if (timerRef.current) clearInterval(timerRef.current);
+        const ordinaryHrs = Math.max(0, netHours - Math.min(netHours, extraHrs));
+        const totalPay = ordinaryHrs * rate + extraHrs * extraRate;
+
+        return {
+            netHours: Number(netHours.toFixed(2)),
+            ordinaryHours: Number(ordinaryHrs.toFixed(2)),
+            extraHours: Number(extraHrs.toFixed(2)),
+            breakMinutes: breakM,
+            totalPay: Number(totalPay.toFixed(2)),
+            valid: m1 > 0 && (!isSplitShift || m2 > 0),
         };
-    }, [isTimerRunning]);
+    }, [t1Start, t1End, t2Start, t2End, isSplitShift, breakMinutesInput, manualRate, extraHoursInput, extraRateInput]);
 
-    // Cargar historial de jornadas desde Supabase
-    const fetchWorkSessions = useCallback(async () => {
-        try {
-            setLoading(true);
-            const { data: { user } } = await supabase.auth.getUser();
-            const currentUserId = user?.id || null;
-            setUserId(currentUserId);
-
-            if (!currentUserId) {
-                // Datos de demostración en modo offline/preview
-                setSessions([
-                    {
-                        id: 'demo-1',
-                        fecha: new Date().toISOString().split('T')[0],
-                        hora_inicio: new Date(Date.now() - 4 * 3600000).toISOString(),
-                        hora_fin: new Date(Date.now() - 3600000).toISOString(),
-                        precio_hora: 45,
-                        ingreso_generado: 135.0,
-                    },
-                    {
-                        id: 'demo-2',
-                        fecha: new Date(Date.now() - 86400000).toISOString().split('T')[0],
-                        hora_inicio: new Date(Date.now() - 90000000).toISOString(),
-                        hora_fin: new Date(Date.now() - 72000000).toISOString(),
-                        precio_hora: 45,
-                        ingreso_generado: 225.0,
-                    },
-                ]);
-                return;
-            }
-
-            const { data, error } = await supabase
-                .from('jornadas_trabajo')
-                .select('*')
-                .eq('user_id', currentUserId)
-                .order('hora_inicio', { ascending: false })
-                .limit(20);
-
-            if (error) throw error;
-            setSessions(data || []);
-        } catch (error) {
-            console.error('Error al cargar jornadas:', error.message);
-        } finally {
-            setLoading(false);
-        }
-    }, []);
-
-    useEffect(() => {
-        fetchWorkSessions();
-    }, [fetchWorkSessions]);
-
-    // Iniciar temporizador
     const handleStartTimer = () => {
         const rate = parseFloat(hourlyRate);
         if (isNaN(rate) || rate <= 0) {
-            Alert.alert('Tarifa inválida', 'Por favor ingresa una tarifa por hora válida antes de iniciar.');
+            Alert.alert('Tarifa requerida', 'Introduce una tarifa por hora válida antes de empezar.');
             return;
         }
         setSessionStartTime(new Date());
+        setIsOnBreak(false);
+        setBreakSeconds(0);
         setIsTimerRunning(true);
     };
 
-    // Detener temporizador y liquidar jornada
+    const handleToggleBreak = () => {
+        setIsOnBreak((prev) => !prev);
+    };
+
+    const resetLiveTimer = () => {
+        setIsTimerRunning(false);
+        setIsOnBreak(false);
+        setSecondsElapsed(0);
+        setBreakSeconds(0);
+        setSessionStartTime(null);
+        setLiveNote('');
+    };
+
+    const saveLiveSession = async (startTime, endTime, rate, totalGenerated) => {
+        try {
+            setSaving(true);
+            const workedHrs = Number((secondsElapsed / 3600).toFixed(2));
+            const breakMins = Math.round(breakSeconds / 60);
+            const tStartStr = `${String(startTime.getHours()).padStart(2, '0')}:${String(startTime.getMinutes()).padStart(2, '0')}`;
+            const tEndStr = `${String(endTime.getHours()).padStart(2, '0')}:${String(endTime.getMinutes()).padStart(2, '0')}`;
+
+            await addWorkSession({
+                fecha: startTime.toISOString().split('T')[0],
+                hora_inicio: startTime.toISOString(),
+                hora_fin: endTime.toISOString(),
+                jornada_partida: false,
+                turno1_inicio: tStartStr,
+                turno1_fin: tEndStr,
+                turno2_inicio: '',
+                turno2_fin: '',
+                descanso_minutos: breakMins,
+                horas_ordinarias: workedHrs,
+                horas_extra: 0,
+                precio_hora: rate,
+                precio_hora_extra: rate,
+                ingreso_generado: totalGenerated,
+                nota: liveNote.trim(),
+            });
+
+            Alert.alert(
+                'Jornada guardada',
+                `Has generado +${totalGenerated.toLocaleString('es-ES')} € (${workedHrs}h trabajadas, ${breakMins} min de descanso).`
+            );
+            resetLiveTimer();
+        } catch (error) {
+            Alert.alert('Error al guardar', error.message);
+        } finally {
+            setSaving(false);
+        }
+    };
+
     const handleStopTimer = async () => {
         if (!sessionStartTime) return;
-
         const endTime = new Date();
         const durationHours = secondsElapsed / 3600;
         const rate = parseFloat(hourlyRate) || 0;
@@ -139,327 +209,304 @@ export default function WorkScreen({ onNavigate }) {
         if (secondsElapsed < 60) {
             Alert.alert(
                 'Sesión muy corta',
-                'La sesión duró menos de 1 minuto. ¿Deseas descartarla o guardarla?',
+                'La sesión activa duró menos de un minuto. ¿Quieres descartarla o guardarla?',
                 [
-                    {
-                        text: 'Descartar',
-                        style: 'destructive',
-                        onPress: () => {
-                            setIsTimerRunning(false);
-                            setSecondsElapsed(0);
-                            setSessionStartTime(null);
-                        },
-                    },
-                    {
-                        text: 'Guardar de todos modos',
-                        onPress: () => saveSession(sessionStartTime, endTime, rate, totalGenerated),
-                    },
+                    { text: 'Descartar', style: 'destructive', onPress: resetLiveTimer },
+                    { text: 'Guardar', onPress: () => saveLiveSession(sessionStartTime, endTime, rate, totalGenerated) },
                 ]
             );
             return;
         }
 
-        await saveSession(sessionStartTime, endTime, rate, totalGenerated);
+        await saveLiveSession(sessionStartTime, endTime, rate, totalGenerated);
     };
 
-    // Guardar sesión en Supabase
-    const saveSession = async (startTime, endTime, rate, totalGenerated) => {
+    const handleSaveManualSession = async () => {
+        if (!manualPreview.valid) {
+            Alert.alert('Horarios inválidos', 'Revisa el formato HH:MM en inicio y fin de cada turno (ej. 09:00 y 14:00).');
+            return;
+        }
+        const rate = parseFloat(manualRate);
+        if (isNaN(rate) || rate <= 0) {
+            Alert.alert('Tarifa requerida', 'Introduce una tarifa normal válida.');
+            return;
+        }
+
         try {
             setSaving(true);
-            const dateStr = startTime.toISOString().split('T')[0];
+            const dateStr = manualDate.trim() || todayDefault;
+            const endTimeStr = isSplitShift ? t2End.trim() : t1End.trim();
+            await addWorkSession({
+                fecha: dateStr,
+                hora_inicio: `${dateStr}T${t1Start.trim()}:00`,
+                hora_fin: `${dateStr}T${endTimeStr}:00`,
+                jornada_partida: isSplitShift,
+                turno1_inicio: t1Start.trim(),
+                turno1_fin: t1End.trim(),
+                turno2_inicio: isSplitShift ? t2Start.trim() : '',
+                turno2_fin: isSplitShift ? t2End.trim() : '',
+                descanso_minutos: manualPreview.breakMinutes,
+                horas_ordinarias: manualPreview.ordinaryHours,
+                horas_extra: manualPreview.extraHours,
+                precio_hora: rate,
+                precio_hora_extra: parseFloat(extraRateInput) || rate,
+                ingreso_generado: manualPreview.totalPay,
+                nota: manualNote.trim(),
+            });
 
-            if (userId) {
-                const { data, error } = await supabase
-                    .from('jornadas_trabajo')
-                    .insert([
-                        {
-                            user_id: userId,
-                            fecha: dateStr,
-                            hora_inicio: startTime.toISOString(),
-                            hora_fin: endTime.toISOString(),
-                            precio_hora: rate,
-                            ingreso_generado: totalGenerated,
-                        },
-                    ])
-                    .select();
-
-                if (error) throw error;
-
-                if (data && data.length > 0) {
-                    setSessions((prev) => [data[0], ...prev]);
-                }
-            } else {
-                // Actualizar estado local si no hay login
-                const newDemo = {
-                    id: `local-${Date.now()}`,
-                    fecha: dateStr,
-                    hora_inicio: startTime.toISOString(),
-                    hora_fin: endTime.toISOString(),
-                    precio_hora: rate,
-                    ingreso_generado: totalGenerated,
-                };
-                setSessions((prev) => [newDemo, ...prev]);
-            }
-
+            setManualModalVisible(false);
+            setManualNote('');
+            setExtraHoursInput('0');
             Alert.alert(
-                'Jornada Liquidada 💰',
-                `Has devengado +${totalGenerated.toLocaleString('es-ES')} € en esta sesión.\nIntegrado automáticamente en tu flujo económico.`
+                'Jornada registrada',
+                `+${manualPreview.totalPay.toLocaleString('es-ES')} € (${manualPreview.ordinaryHours}h ord. + ${manualPreview.extraHours}h extra).`
             );
-
-            // Resetear temporizador
-            setIsTimerRunning(false);
-            setSecondsElapsed(0);
-            setSessionStartTime(null);
         } catch (error) {
-            Alert.alert('Error al guardar sesión', error.message);
+            Alert.alert('Error al guardar', error.message);
         } finally {
             setSaving(false);
         }
     };
 
-    // Guardar sesión manual
-    const handleSaveManualSession = async () => {
-        const hrs = parseFloat(manualHours);
-        const rate = parseFloat(manualRate);
-
-        if (isNaN(hrs) || hrs <= 0) {
-            Alert.alert('Datos requeridos', 'Ingresa la cantidad de horas trabajadas.');
-            return;
-        }
-        if (isNaN(rate) || rate <= 0) {
-            Alert.alert('Datos requeridos', 'Ingresa una tarifa horaria válida.');
-            return;
-        }
-
-        const totalEarned = Number((hrs * rate).toFixed(2));
-        const now = new Date();
-        const start = new Date(now.getTime() - hrs * 3600000);
-
-        await saveSession(start, now, rate, totalEarned);
-        setManualModalVisible(false);
-        setManualHours('');
+    const handleDelete = (id) => {
+        Alert.alert('Eliminar registro', '¿Quieres borrar esta jornada?', [
+            { text: 'Cancelar', style: 'cancel' },
+            { text: 'Eliminar', style: 'destructive', onPress: () => deleteWorkSession(id) },
+        ]);
     };
 
-    // Eliminar una sesión
-    const handleDeleteSession = async (sessionId) => {
-        Alert.alert(
-            'Eliminar Jornada',
-            '¿Seguro que deseas eliminar este registro? Se recalculará tu ingreso mensual.',
-            [
-                { text: 'Cancelar', style: 'cancel' },
-                {
-                    text: 'Eliminar',
-                    style: 'destructive',
-                    onPress: async () => {
-                        try {
-                            if (userId) {
-                                await supabase
-                                    .from('jornadas_trabajo')
-                                    .delete()
-                                    .eq('id', sessionId);
-                            }
-                            setSessions((prev) => prev.filter((s) => s.id !== sessionId));
-                        } catch (err) {
-                            Alert.alert('Error', err.message);
-                        }
-                    },
-                },
-            ]
-        );
-    };
-
-    // Métricas calculadas para la cabecera
     const todayStr = new Date().toISOString().split('T')[0];
-    const todaySessions = sessions.filter((s) => s.fecha === todayStr);
+    const yesterdayDate = new Date();
+    yesterdayDate.setDate(yesterdayDate.getDate() - 1);
+    const yesterdayStr = yesterdayDate.toISOString().split('T')[0];
 
+    const todaySessions = sessions.filter((s) => (s.fecha || '').startsWith(todayStr));
     const todayHours = todaySessions.reduce((acc, s) => {
+        if (s.horas_ordinarias !== undefined || s.horas_extra !== undefined) {
+            return acc + (Number(s.horas_ordinarias) || 0) + (Number(s.horas_extra) || 0);
+        }
         const diff = new Date(s.hora_fin) - new Date(s.hora_inicio);
-        return acc + Math.max(0, diff / (1000 * 3600));
+        return acc + Math.max(0, diff / 3600000);
     }, 0);
-
+    const todayBreaks = todaySessions.reduce((acc, s) => acc + (Number(s.descanso_minutos) || 0), 0);
     const todayIncome = todaySessions.reduce((acc, s) => acc + (Number(s.ingreso_generado) || 0), 0);
-
-    const totalHistoryIncome = sessions.reduce((acc, s) => acc + (Number(s.ingreso_generado) || 0), 0);
-    const totalHistoryHours = sessions.reduce((acc, s) => {
-        const diff = new Date(s.hora_fin) - new Date(s.hora_inicio);
-        return acc + Math.max(0, diff / (1000 * 3600));
-    }, 0);
 
     return (
         <View style={styles.container}>
-            <ScrollView contentContainerStyle={styles.scrollContent}>
-                {/* Cabecera */}
-                <View style={styles.header}>
-                    <View>
-                        <Text style={styles.superTitle}>PILAR TRABAJO & PRODUCTIVIDAD</Text>
-                        <Text style={styles.mainTitle}>Control de Jornada</Text>
+            <ScrollView
+                contentContainerStyle={styles.scrollContent}
+                showsVerticalScrollIndicator={false}
+            >
+                <View style={styles.innerWrap}>
+                    {/* Barra superior */}
+                    <View style={styles.topNav}>
+                        {onNavigate && (
+                            <TouchableOpacity
+                                style={styles.backBtn}
+                                onPress={() => onNavigate('dashboard')}
+                            >
+                                <Text style={styles.backBtnText}>← Inicio</Text>
+                            </TouchableOpacity>
+                        )}
+                        <TouchableOpacity
+                            style={styles.manualBtn}
+                            onPress={() => {
+                                setManualDate(todayStr);
+                                setManualRate(hourlyRate || '45');
+                                setManualModalVisible(true);
+                            }}
+                        >
+                            <Text style={styles.manualBtnText}>+ Registrar turno / partida</Text>
+                        </TouchableOpacity>
                     </View>
-                    <TouchableOpacity
-                        style={styles.manualEntryBtn}
-                        onPress={() => setManualModalVisible(true)}
-                    >
-                        <Text style={styles.manualEntryBtnText}>+ Manual</Text>
-                    </TouchableOpacity>
-                </View>
 
-                {/* KPI Bar de Hoy */}
-                <View style={styles.kpiContainer}>
-                    <View style={styles.kpiBox}>
-                        <Text style={styles.kpiLabel}>HORAS HOY</Text>
-                        <Text style={styles.kpiValueCyan}>{todayHours.toFixed(1)}h</Text>
-                    </View>
-                    <View style={styles.kpiDivider} />
-                    <View style={styles.kpiBox}>
-                        <Text style={styles.kpiLabel}>INGRESADO HOY</Text>
-                        <Text style={styles.kpiValueGreen}>+{todayIncome.toLocaleString('es-ES')} €</Text>
-                    </View>
-                    <View style={styles.kpiDivider} />
-                    <View style={styles.kpiBox}>
-                        <Text style={styles.kpiLabel}>TARIFA ACTIVA</Text>
-                        <Text style={styles.kpiValueWhite}>{hourlyRate}€/h</Text>
-                    </View>
-                </View>
+                    <Text style={styles.title}>Jornada</Text>
+                    <Text style={styles.subtitle}>
+                        Fichaje en vivo con pausas, o registro completo de jornada partida, descansos y horas extra.
+                    </Text>
 
-                {/* TEMPORIZADOR EJECUTIVO EN VIVO */}
-                <View style={[styles.timerCard, isTimerRunning && styles.timerCardActive]}>
-                    <View style={styles.timerStatusRow}>
-                        <View style={[styles.statusDot, isTimerRunning && styles.statusDotActive]} />
-                        <Text style={[styles.statusLabel, isTimerRunning && styles.statusLabelActive]}>
-                            {isTimerRunning ? 'PRODUCCIÓN EN CURSO // LIQUIDANDO TIEMPO' : 'SISTEMA EN ESPERA'}
+                    {/* Resumen de hoy */}
+                    <View style={styles.kpiCard}>
+                        <View style={styles.kpiItem}>
+                            <Text style={styles.kpiLabel}>Horas hoy</Text>
+                            <Text style={[styles.kpiValue, { color: '#38BDF8' }]}>
+                                {todayHours.toFixed(1)} h
+                            </Text>
+                        </View>
+                        <View style={styles.kpiDivider} />
+                        <View style={styles.kpiItem}>
+                            <Text style={styles.kpiLabel}>Descansos</Text>
+                            <Text style={styles.kpiValue}>{todayBreaks} min</Text>
+                        </View>
+                        <View style={styles.kpiDivider} />
+                        <View style={styles.kpiItem}>
+                            <Text style={styles.kpiLabel}>Generado hoy</Text>
+                            <Text style={[styles.kpiValue, { color: '#34D399' }]}>
+                                +{todayIncome.toFixed(0)} €
+                            </Text>
+                        </View>
+                    </View>
+
+                    {/* Temporizador con Pausa/Descanso */}
+                    <View style={styles.timerCard}>
+                        <Text style={[styles.timerStatus, isOnBreak && { color: '#F59E0B' }]}>
+                            {!isTimerRunning
+                                ? 'Listo para empezar'
+                                : isOnBreak
+                                    ? `En descanso (${formatTime(breakSeconds)})`
+                                    : 'Jornada activa'}
                         </Text>
-                    </View>
+                        <Text style={[styles.timerDisplay, isOnBreak && { color: '#A1A1AA' }]}>
+                            {formatTime(secondsElapsed)}
+                        </Text>
+                        <Text style={styles.liveEarnings}>+{liveEarnings} € acumulados</Text>
+                        {breakSeconds > 0 && (
+                            <Text style={styles.breakInfoText}>
+                                Descanso acumulado: {Math.floor(breakSeconds / 60)} min {breakSeconds % 60}s
+                            </Text>
+                        )}
 
-                    {/* Digital Clock */}
-                    <Text style={styles.timerDisplay}>{formatTime(secondsElapsed)}</Text>
-
-                    {/* Ticker de dinero devengado en vivo */}
-                    <View style={styles.liveCashRow}>
-                        <Text style={styles.liveCashPrefix}>Valor Generado:</Text>
-                        <Text style={styles.liveCashAmount}>+{liveEarnings} €</Text>
-                    </View>
-
-                    {/* Configuración de Tarifa Horaria */}
-                    {!isTimerRunning && (
-                        <View style={styles.rateConfigSection}>
-                            <Text style={styles.rateConfigTitle}>TARIFA DE LA SESIÓN (€ / HORA)</Text>
-                            <View style={styles.ratePresetsRow}>
-                                {['35', '45', '60', '80'].map((preset) => (
-                                    <TouchableOpacity
-                                        key={preset}
-                                        style={[
-                                            styles.presetPill,
-                                            hourlyRate === preset && styles.presetPillActive,
-                                        ]}
-                                        onPress={() => setHourlyRate(preset)}
-                                    >
-                                        <Text
+                        {!isTimerRunning && (
+                            <View style={styles.rateSection}>
+                                <Text style={styles.rateLabel}>Tarifa ordinaria por hora</Text>
+                                <View style={styles.rateRow}>
+                                    {['35', '45', '60', '80'].map((preset) => (
+                                        <TouchableOpacity
+                                            key={preset}
                                             style={[
-                                                styles.presetPillText,
-                                                hourlyRate === preset && styles.presetPillTextActive,
+                                                styles.ratePill,
+                                                hourlyRate === preset && styles.ratePillActive,
                                             ]}
+                                            onPress={() => setHourlyRate(preset)}
                                         >
-                                            {preset}€
-                                        </Text>
-                                    </TouchableOpacity>
-                                ))}
-                                <View style={styles.customRateWrap}>
+                                            <Text
+                                                style={[
+                                                    styles.ratePillText,
+                                                    hourlyRate === preset && styles.ratePillTextActive,
+                                                ]}
+                                            >
+                                                {preset} €
+                                            </Text>
+                                        </TouchableOpacity>
+                                    ))}
                                     <TextInput
                                         style={styles.customRateInput}
                                         keyboardType="numeric"
                                         value={hourlyRate}
                                         onChangeText={setHourlyRate}
-                                        placeholder="Otro"
-                                        placeholderTextColor="#52525b"
+                                        placeholder="Otra"
+                                        placeholderTextColor="#52525B"
                                     />
-                                    <Text style={styles.customRateUnit}>€/h</Text>
                                 </View>
                             </View>
-                        </View>
-                    )}
+                        )}
 
-                    {/* Botón Principal (Start / Stop) */}
-                    <View style={styles.actionsContainer}>
+                        <TextInput
+                            style={styles.liveNoteInput}
+                            placeholder="Nota o proyecto de la jornada (opcional)"
+                            placeholderTextColor="#52525B"
+                            value={liveNote}
+                            onChangeText={setLiveNote}
+                        />
+
                         {!isTimerRunning ? (
                             <TouchableOpacity
                                 style={styles.startBtn}
                                 activeOpacity={0.8}
                                 onPress={handleStartTimer}
                             >
-                                <Text style={styles.startBtnIcon}>▶</Text>
-                                <Text style={styles.startBtnText}>INICIAR JORNADA</Text>
+                                <Text style={styles.startBtnText}>Iniciar jornada</Text>
                             </TouchableOpacity>
                         ) : (
-                            <TouchableOpacity
-                                style={styles.stopBtn}
-                                activeOpacity={0.8}
-                                onPress={handleStopTimer}
-                                disabled={saving}
-                            >
-                                {saving ? (
-                                    <ActivityIndicator color="#ffffff" />
-                                ) : (
-                                    <>
-                                        <Text style={styles.stopBtnIcon}>■</Text>
-                                        <Text style={styles.stopBtnText}>FINALIZAR Y FACTURAR</Text>
-                                    </>
-                                )}
-                            </TouchableOpacity>
+                            <View style={styles.timerBtnsRow}>
+                                <TouchableOpacity
+                                    style={[styles.breakBtn, isOnBreak && styles.breakBtnResume]}
+                                    activeOpacity={0.8}
+                                    onPress={handleToggleBreak}
+                                >
+                                    <Text style={styles.breakBtnText}>
+                                        {isOnBreak ? 'Reanudar' : 'Pausa / Descanso'}
+                                    </Text>
+                                </TouchableOpacity>
+                                <TouchableOpacity
+                                    style={[styles.stopBtn, { flex: 1, marginTop: 0 }]}
+                                    activeOpacity={0.8}
+                                    onPress={handleStopTimer}
+                                    disabled={saving}
+                                >
+                                    {saving ? (
+                                        <ActivityIndicator color="#000000" />
+                                    ) : (
+                                        <Text style={styles.stopBtnText}>Finalizar</Text>
+                                    )}
+                                </TouchableOpacity>
+                            </View>
                         )}
                     </View>
-                </View>
 
-                {/* HISTORIAL RECIENTE DE JORNADAS */}
-                <View style={styles.historySection}>
-                    <View style={styles.historyHeader}>
-                        <Text style={styles.historyTitle}>SESIONES RECIENTES</Text>
-                        <Text style={styles.historySubtitle}>
-                            {sessions.length} registros • {totalHistoryHours.toFixed(1)}h acumuladas
-                        </Text>
-                    </View>
-
+                    {/* Historial detallado */}
+                    <Text style={styles.sectionTitle}>Últimas jornadas</Text>
                     {loading ? (
-                        <ActivityIndicator color="#06b6d4" style={{ marginTop: 20 }} />
+                        <ActivityIndicator color="#38BDF8" />
                     ) : sessions.length === 0 ? (
                         <View style={styles.emptyCard}>
-                            <Text style={styles.emptyCardText}>No hay jornadas registradas aún.</Text>
-                            <Text style={styles.emptyCardSubText}>Inicia el temporizador al empezar tu jornada de trabajo.</Text>
+                            <Text style={styles.emptyText}>No hay jornadas registradas todavía.</Text>
                         </View>
                     ) : (
-                        sessions.map((item) => {
-                            const diffMs = new Date(item.hora_fin) - new Date(item.hora_inicio);
-                            const durationHrs = Math.max(0, diffMs / (1000 * 3600)).toFixed(2);
-                            const startTimeStr = new Date(item.hora_inicio).toLocaleTimeString('es-ES', {
-                                hour: '2-digit',
-                                minute: '2-digit',
-                            });
-                            const endTimeStr = new Date(item.hora_fin).toLocaleTimeString('es-ES', {
-                                hour: '2-digit',
-                                minute: '2-digit',
-                            });
+                        sessions.slice(0, 12).map((item) => {
+                            const netHrs = (item.horas_ordinarias !== undefined || item.horas_extra !== undefined)
+                                ? (Number(item.horas_ordinarias) || 0) + (Number(item.horas_extra) || 0)
+                                : Math.max(0, (new Date(item.hora_fin) - new Date(item.hora_inicio)) / 3600000);
+
+                            const horarioStr = item.turno1_inicio && item.turno1_fin
+                                ? (item.jornada_partida && item.turno2_inicio && item.turno2_fin
+                                    ? `${item.turno1_inicio}–${item.turno1_fin} / ${item.turno2_inicio}–${item.turno2_fin}`
+                                    : `${item.turno1_inicio}–${item.turno1_fin}`)
+                                : '';
 
                             return (
                                 <View key={item.id} style={styles.sessionCard}>
-                                    <View style={styles.sessionInfoWrap}>
-                                        <View style={styles.sessionDateRow}>
-                                            <Text style={styles.sessionDate}>{item.fecha}</Text>
-                                            <Text style={styles.sessionHoursRange}>
-                                                {startTimeStr} - {endTimeStr} ({durationHrs}h)
+                                    <View style={{ flex: 1, paddingRight: 10 }}>
+                                        <View style={styles.sessionTopRow}>
+                                            <Text style={styles.sessionDate}>
+                                                {item.fecha} · {netHrs.toFixed(1)} h
                                             </Text>
+                                            {item.jornada_partida && (
+                                                <View style={styles.splitBadge}>
+                                                    <Text style={styles.splitBadgeText}>Partida</Text>
+                                                </View>
+                                            )}
+                                            {Number(item.horas_extra) > 0 && (
+                                                <View style={styles.extraBadge}>
+                                                    <Text style={styles.extraBadgeText}>
+                                                        +{item.horas_extra}h extra
+                                                    </Text>
+                                                </View>
+                                            )}
                                         </View>
-                                        <Text style={styles.sessionRateLegend}>
-                                            Tarifa aplicada: {item.precio_hora} €/h
+                                        <Text style={styles.sessionSub}>
+                                            {horarioStr ? `${horarioStr} · ` : ''}
+                                            {item.descanso_minutos ? `Desc. ${item.descanso_minutos}m · ` : ''}
+                                            {item.precio_hora} €/h
+                                            {Number(item.horas_extra) > 0 && item.precio_hora_extra
+                                                ? ` (extra ${item.precio_hora_extra} €/h)`
+                                                : ''}
                                         </Text>
+                                        {item.nota ? (
+                                            <Text style={styles.sessionNote} numberOfLines={2}>
+                                                {item.nota}
+                                            </Text>
+                                        ) : null}
                                     </View>
-
                                     <View style={styles.sessionRight}>
                                         <Text style={styles.sessionIncome}>
-                                            +{Number(item.ingreso_generado || 0).toLocaleString('es-ES')} €
+                                            +{Number(item.ingreso_generado || 0).toFixed(2)} €
                                         </Text>
                                         <TouchableOpacity
-                                            onPress={() => handleDeleteSession(item.id)}
                                             style={styles.deleteBtn}
+                                            onPress={() => handleDelete(item.id)}
                                         >
-                                            <Text style={styles.deleteBtnText}>✕</Text>
+                                            <Text style={styles.deleteText}>✕</Text>
                                         </TouchableOpacity>
                                     </View>
                                 </View>
@@ -469,7 +516,7 @@ export default function WorkScreen({ onNavigate }) {
                 </View>
             </ScrollView>
 
-            {/* MODAL REGISTRO MANUAL */}
+            {/* Modal completo de Jornada Continua / Partida + Descansos + Horas Extra */}
             <Modal
                 visible={manualModalVisible}
                 transparent
@@ -478,59 +525,190 @@ export default function WorkScreen({ onNavigate }) {
             >
                 <View style={styles.modalOverlay}>
                     <View style={styles.modalCard}>
-                        <Text style={styles.modalTitle}>Añadir Jornada Manual</Text>
-                        <Text style={styles.modalSub}>
-                            Registra horas de trabajo previas para computar ingresos y flujo de caja.
-                        </Text>
+                        <ScrollView showsVerticalScrollIndicator={false}>
+                            <Text style={styles.modalTitle}>Registrar jornada completa</Text>
+                            <Text style={styles.modalSub}>
+                                Incluye horario continuo o partido, descanso y tarifa de hora extra.
+                            </Text>
 
-                        <Text style={styles.inputLabel}>HORAS TRABAJADAS</Text>
-                        <TextInput
-                            style={styles.modalInput}
-                            keyboardType="numeric"
-                            placeholder="Ej. 4.5"
-                            placeholderTextColor="#52525b"
-                            value={manualHours}
-                            onChangeText={setManualHours}
-                        />
-
-                        <Text style={styles.inputLabel}>TARIFA POR HORA (€)</Text>
-                        <TextInput
-                            style={styles.modalInput}
-                            keyboardType="numeric"
-                            placeholder="45"
-                            placeholderTextColor="#52525b"
-                            value={manualRate}
-                            onChangeText={setManualRate}
-                        />
-
-                        {manualHours && manualRate && !isNaN(parseFloat(manualHours)) && !isNaN(parseFloat(manualRate)) ? (
-                            <View style={styles.modalPreview}>
-                                <Text style={styles.modalPreviewLabel}>Ingreso Devengado a Liquidar:</Text>
-                                <Text style={styles.modalPreviewAmount}>
-                                    +{(parseFloat(manualHours) * parseFloat(manualRate)).toFixed(2)} €
-                                </Text>
+                            {/* Fecha */}
+                            <View style={styles.dateRow}>
+                                <TouchableOpacity
+                                    style={[styles.smallChip, manualDate === todayStr && styles.smallChipActive]}
+                                    onPress={() => setManualDate(todayStr)}
+                                >
+                                    <Text style={[styles.smallChipText, manualDate === todayStr && styles.smallChipTextActive]}>
+                                        Hoy
+                                    </Text>
+                                </TouchableOpacity>
+                                <TouchableOpacity
+                                    style={[styles.smallChip, manualDate === yesterdayStr && styles.smallChipActive]}
+                                    onPress={() => setManualDate(yesterdayStr)}
+                                >
+                                    <Text style={[styles.smallChipText, manualDate === yesterdayStr && styles.smallChipTextActive]}>
+                                        Ayer
+                                    </Text>
+                                </TouchableOpacity>
+                                <TextInput
+                                    style={styles.dateInput}
+                                    value={manualDate}
+                                    onChangeText={setManualDate}
+                                    placeholder="AAAA-MM-DD"
+                                    placeholderTextColor="#52525B"
+                                />
                             </View>
-                        ) : null}
 
-                        <View style={styles.modalActions}>
-                            <TouchableOpacity
-                                style={styles.modalCancelBtn}
-                                onPress={() => setManualModalVisible(false)}
-                            >
-                                <Text style={styles.modalCancelBtnText}>Cancelar</Text>
-                            </TouchableOpacity>
-                            <TouchableOpacity
-                                style={styles.modalConfirmBtn}
-                                onPress={handleSaveManualSession}
-                                disabled={saving}
-                            >
-                                {saving ? (
-                                    <ActivityIndicator color="#000000" />
-                                ) : (
-                                    <Text style={styles.modalConfirmBtnText}>Guardar</Text>
-                                )}
-                            </TouchableOpacity>
-                        </View>
+                            {/* Tipo de jornada */}
+                            <Text style={styles.inputLabel}>Tipo de jornada</Text>
+                            <View style={styles.toggleRow}>
+                                <TouchableOpacity
+                                    style={[styles.toggleBtn, !isSplitShift && styles.toggleBtnActive]}
+                                    onPress={() => setIsSplitShift(false)}
+                                >
+                                    <Text style={[styles.toggleText, !isSplitShift && styles.toggleTextActive]}>
+                                        Continua
+                                    </Text>
+                                </TouchableOpacity>
+                                <TouchableOpacity
+                                    style={[styles.toggleBtn, isSplitShift && styles.toggleBtnActive]}
+                                    onPress={() => setIsSplitShift(true)}
+                                >
+                                    <Text style={[styles.toggleText, isSplitShift && styles.toggleTextActive]}>
+                                        Jornada partida
+                                    </Text>
+                                </TouchableOpacity>
+                            </View>
+
+                            {/* Turno 1 */}
+                            <Text style={styles.inputLabel}>
+                                {isSplitShift ? 'Turno mañana (Inicio — Fin)' : 'Horario (Inicio — Fin)'}
+                            </Text>
+                            <View style={styles.twoCol}>
+                                <TextInput
+                                    style={[styles.modalInput, { flex: 1 }]}
+                                    value={t1Start}
+                                    onChangeText={setT1Start}
+                                    placeholder="09:00"
+                                    placeholderTextColor="#52525B"
+                                />
+                                <TextInput
+                                    style={[styles.modalInput, { flex: 1 }]}
+                                    value={t1End}
+                                    onChangeText={setT1End}
+                                    placeholder="14:00"
+                                    placeholderTextColor="#52525B"
+                                />
+                            </View>
+
+                            {/* Turno 2 si partida */}
+                            {isSplitShift && (
+                                <>
+                                    <Text style={styles.inputLabel}>Turno tarde (Inicio — Fin)</Text>
+                                    <View style={styles.twoCol}>
+                                        <TextInput
+                                            style={[styles.modalInput, { flex: 1 }]}
+                                            value={t2Start}
+                                            onChangeText={setT2Start}
+                                            placeholder="15:30"
+                                            placeholderTextColor="#52525B"
+                                        />
+                                        <TextInput
+                                            style={[styles.modalInput, { flex: 1 }]}
+                                            value={t2End}
+                                            onChangeText={setT2End}
+                                            placeholder="18:30"
+                                            placeholderTextColor="#52525B"
+                                        />
+                                    </View>
+                                </>
+                            )}
+
+                            {/* Descanso y Tarifa normal */}
+                            <View style={styles.twoCol}>
+                                <View style={{ flex: 1 }}>
+                                    <Text style={styles.inputLabel}>Descanso (min)</Text>
+                                    <TextInput
+                                        style={styles.modalInput}
+                                        keyboardType="numeric"
+                                        value={breakMinutesInput}
+                                        onChangeText={setBreakMinutesInput}
+                                        placeholder="15"
+                                        placeholderTextColor="#52525B"
+                                    />
+                                </View>
+                                <View style={{ flex: 1 }}>
+                                    <Text style={styles.inputLabel}>Tarifa normal (€/h)</Text>
+                                    <TextInput
+                                        style={styles.modalInput}
+                                        keyboardType="numeric"
+                                        value={manualRate}
+                                        onChangeText={setManualRate}
+                                        placeholder="45"
+                                        placeholderTextColor="#52525B"
+                                    />
+                                </View>
+                            </View>
+
+                            {/* Horas extra y tarifa extra */}
+                            <View style={styles.twoCol}>
+                                <View style={{ flex: 1 }}>
+                                    <Text style={styles.inputLabel}>Horas extra</Text>
+                                    <TextInput
+                                        style={styles.modalInput}
+                                        keyboardType="numeric"
+                                        value={extraHoursInput}
+                                        onChangeText={setExtraHoursInput}
+                                        placeholder="0"
+                                        placeholderTextColor="#52525B"
+                                    />
+                                </View>
+                                <View style={{ flex: 1 }}>
+                                    <Text style={styles.inputLabel}>Precio hora extra (€)</Text>
+                                    <TextInput
+                                        style={styles.modalInput}
+                                        keyboardType="numeric"
+                                        value={extraRateInput}
+                                        onChangeText={setExtraRateInput}
+                                        placeholder="60"
+                                        placeholderTextColor="#52525B"
+                                    />
+                                </View>
+                            </View>
+
+                            <Text style={styles.inputLabel}>Nota / tarea (opcional)</Text>
+                            <TextInput
+                                style={styles.modalInput}
+                                value={manualNote}
+                                onChangeText={setManualNote}
+                                placeholder="Ej: Cierre de sprint o guardia"
+                                placeholderTextColor="#52525B"
+                            />
+
+                            {/* Previsualización */}
+                            <View style={styles.previewBox}>
+                                <Text style={styles.previewTitle}>Resumen calculado</Text>
+                                <Text style={styles.previewLine}>
+                                    {manualPreview.ordinaryHours}h ord. + {manualPreview.extraHours}h extra · Descanso {manualPreview.breakMinutes}m
+                                </Text>
+                                <Text style={styles.previewTotal}>+{manualPreview.totalPay.toFixed(2)} €</Text>
+                            </View>
+
+                            <View style={styles.modalActions}>
+                                <TouchableOpacity
+                                    style={styles.modalCancelBtn}
+                                    onPress={() => setManualModalVisible(false)}
+                                >
+                                    <Text style={styles.modalCancelText}>Cancelar</Text>
+                                </TouchableOpacity>
+                                <TouchableOpacity
+                                    style={styles.modalConfirmBtn}
+                                    onPress={handleSaveManualSession}
+                                    disabled={saving}
+                                >
+                                    <Text style={styles.modalConfirmText}>Guardar jornada</Text>
+                                </TouchableOpacity>
+                            </View>
+                        </ScrollView>
                     </View>
                 </View>
             </Modal>
@@ -539,454 +717,266 @@ export default function WorkScreen({ onNavigate }) {
 }
 
 const styles = StyleSheet.create({
-    container: {
-        flex: 1,
-        backgroundColor: '#000000',
-    },
-    scrollContent: {
-        paddingHorizontal: 16,
-        paddingTop: 20,
-        paddingBottom: 48,
-    },
-    header: {
+    container: { flex: 1, backgroundColor: '#000000' },
+    scrollContent: { paddingHorizontal: 20, paddingTop: 14, paddingBottom: 40 },
+    innerWrap: { width: '100%', maxWidth: 520, alignSelf: 'center' },
+    topNav: {
         flexDirection: 'row',
         justifyContent: 'space-between',
         alignItems: 'center',
-        marginBottom: 16,
+        marginBottom: 12,
     },
-    superTitle: {
-        color: '#06b6d4',
-        fontSize: 10,
-        fontWeight: '800',
-        letterSpacing: 1.2,
-    },
-    mainTitle: {
-        color: '#f4f4f5',
-        fontSize: 22,
-        fontWeight: '900',
-        letterSpacing: -0.5,
-        marginTop: 2,
-    },
-    manualEntryBtn: {
-        backgroundColor: '#121216',
-        paddingHorizontal: 14,
+    backBtn: { paddingVertical: 6, paddingRight: 12 },
+    backBtnText: { color: '#A1A1AA', fontSize: 14, fontWeight: '600' },
+    manualBtn: {
+        backgroundColor: '#111114',
+        paddingHorizontal: 12,
         paddingVertical: 7,
-        borderRadius: 8,
+        borderRadius: 10,
         borderWidth: 1,
-        borderColor: '#27272a',
+        borderColor: '#232329',
     },
-    manualEntryBtnText: {
-        color: '#38bdf8',
-        fontSize: 12,
-        fontWeight: '700',
-    },
-    kpiContainer: {
+    manualBtnText: { color: '#38BDF8', fontSize: 12, fontWeight: '600' },
+    title: { color: '#FAFAFA', fontSize: 26, fontWeight: '700', letterSpacing: -0.5 },
+    subtitle: { color: '#A1A1AA', fontSize: 13, marginTop: 4, marginBottom: 18, lineHeight: 18 },
+    kpiCard: {
         flexDirection: 'row',
-        backgroundColor: '#0a0a0c',
-        borderRadius: 14,
+        backgroundColor: '#111114',
+        borderRadius: 18,
         paddingVertical: 14,
-        paddingHorizontal: 16,
         borderWidth: 1,
-        borderColor: '#1f1f23',
-        marginBottom: 20,
-        justifyContent: 'space-between',
+        borderColor: '#232329',
+        marginBottom: 18,
     },
-    kpiBox: {
-        flex: 1,
-        alignItems: 'center',
-    },
-    kpiDivider: {
-        width: 1,
-        backgroundColor: '#1f1f23',
-    },
-    kpiLabel: {
-        color: '#71717a',
-        fontSize: 9,
-        fontWeight: '800',
-        letterSpacing: 0.8,
-        marginBottom: 4,
-    },
-    kpiValueCyan: {
-        color: '#06b6d4',
-        fontSize: 17,
-        fontWeight: '900',
-    },
-    kpiValueGreen: {
-        color: '#10b981',
-        fontSize: 17,
-        fontWeight: '900',
-    },
-    kpiValueWhite: {
-        color: '#f4f4f5',
-        fontSize: 17,
-        fontWeight: '900',
-    },
-
-    // Tarjeta del Cronómetro
+    kpiItem: { flex: 1, alignItems: 'center' },
+    kpiDivider: { width: 1, backgroundColor: '#232329' },
+    kpiLabel: { color: '#71717A', fontSize: 11, marginBottom: 3 },
+    kpiValue: { color: '#FAFAFA', fontSize: 16, fontWeight: '700' },
     timerCard: {
-        backgroundColor: '#0a0a0c',
-        borderRadius: 20,
-        padding: 22,
+        backgroundColor: '#111114',
+        borderRadius: 22,
+        padding: 20,
         borderWidth: 1,
-        borderColor: '#1f1f23',
+        borderColor: '#232329',
         alignItems: 'center',
         marginBottom: 24,
     },
-    timerCardActive: {
-        borderColor: 'rgba(6, 182, 212, 0.5)',
-        backgroundColor: '#081016',
-    },
-    timerStatusRow: {
-        flexDirection: 'row',
-        alignItems: 'center',
-        marginBottom: 16,
-    },
-    statusDot: {
-        width: 8,
-        height: 8,
-        borderRadius: 4,
-        backgroundColor: '#52525b',
-        marginRight: 8,
-    },
-    statusDotActive: {
-        backgroundColor: '#06b6d4',
-    },
-    statusLabel: {
-        color: '#71717a',
-        fontSize: 10,
-        fontWeight: '800',
-        letterSpacing: 1.2,
-    },
-    statusLabelActive: {
-        color: '#06b6d4',
-    },
-    timerDisplay: {
-        color: '#ffffff',
-        fontSize: 54,
-        fontWeight: '900',
-        letterSpacing: 2,
-    },
-    liveCashRow: {
-        flexDirection: 'row',
-        alignItems: 'center',
-        marginTop: 8,
-        backgroundColor: 'rgba(16, 185, 129, 0.1)',
-        paddingHorizontal: 14,
-        paddingVertical: 6,
-        borderRadius: 20,
-        borderWidth: 1,
-        borderColor: 'rgba(16, 185, 129, 0.25)',
-    },
-    liveCashPrefix: {
-        color: '#a1a1aa',
-        fontSize: 12,
-        fontWeight: '600',
-        marginRight: 6,
-    },
-    liveCashAmount: {
-        color: '#10b981',
-        fontSize: 15,
-        fontWeight: '800',
-    },
-
-    // Tarifas
-    rateConfigSection: {
-        width: '100%',
-        marginTop: 20,
-        marginBottom: 10,
-    },
-    rateConfigTitle: {
-        color: '#71717a',
-        fontSize: 10,
-        fontWeight: '800',
-        letterSpacing: 0.8,
-        marginBottom: 8,
-        textAlign: 'center',
-    },
-    ratePresetsRow: {
-        flexDirection: 'row',
-        justifyContent: 'center',
-        alignItems: 'center',
-        gap: 8,
-    },
-    presetPill: {
+    timerStatus: { color: '#A1A1AA', fontSize: 13, fontWeight: '600', marginBottom: 8 },
+    timerDisplay: { color: '#FAFAFA', fontSize: 44, fontWeight: '700', letterSpacing: 1 },
+    liveEarnings: { color: '#34D399', fontSize: 15, fontWeight: '600', marginTop: 6 },
+    breakInfoText: { color: '#F59E0B', fontSize: 12, marginTop: 4 },
+    rateSection: { width: '100%', marginTop: 18, marginBottom: 4 },
+    rateLabel: { color: '#71717A', fontSize: 12, textAlign: 'center', marginBottom: 8 },
+    rateRow: { flexDirection: 'row', justifyContent: 'center', alignItems: 'center', gap: 8 },
+    ratePill: {
         paddingVertical: 8,
-        paddingHorizontal: 14,
+        paddingHorizontal: 12,
         borderRadius: 10,
-        backgroundColor: '#141418',
+        backgroundColor: '#18181C',
         borderWidth: 1,
-        borderColor: '#27272a',
+        borderColor: '#27272E',
     },
-    presetPillActive: {
-        backgroundColor: '#06b6d4',
-        borderColor: '#06b6d4',
-    },
-    presetPillText: {
-        color: '#a1a1aa',
-        fontSize: 13,
-        fontWeight: '700',
-    },
-    presetPillTextActive: {
-        color: '#000000',
-        fontWeight: '900',
-    },
-    customRateWrap: {
-        flexDirection: 'row',
-        alignItems: 'center',
-        backgroundColor: '#141418',
+    ratePillActive: { backgroundColor: '#38BDF8', borderColor: '#38BDF8' },
+    ratePillText: { color: '#A1A1AA', fontSize: 13, fontWeight: '600' },
+    ratePillTextActive: { color: '#000000', fontWeight: '700' },
+    customRateInput: {
+        backgroundColor: '#18181C',
+        color: '#FAFAFA',
         borderRadius: 10,
         paddingHorizontal: 10,
-        borderWidth: 1,
-        borderColor: '#27272a',
-        height: 38,
-    },
-    customRateInput: {
-        color: '#ffffff',
+        paddingVertical: 7,
+        width: 56,
+        textAlign: 'center',
         fontSize: 13,
-        fontWeight: '700',
-        width: 36,
-        padding: 0,
-    },
-    customRateUnit: {
-        color: '#71717a',
-        fontSize: 11,
         fontWeight: '600',
+        borderWidth: 1,
+        borderColor: '#27272E',
     },
-
-    // Botones
-    actionsContainer: {
+    liveNoteInput: {
         width: '100%',
-        marginTop: 20,
+        backgroundColor: '#18181C',
+        borderRadius: 12,
+        paddingHorizontal: 12,
+        paddingVertical: 10,
+        color: '#FAFAFA',
+        fontSize: 13,
+        borderWidth: 1,
+        borderColor: '#232329',
+        marginTop: 14,
     },
     startBtn: {
-        flexDirection: 'row',
-        backgroundColor: '#06b6d4',
+        width: '100%',
+        backgroundColor: '#38BDF8',
         borderRadius: 14,
-        paddingVertical: 16,
-        justifyContent: 'center',
+        paddingVertical: 15,
         alignItems: 'center',
+        marginTop: 14,
+    },
+    startBtnText: { color: '#000000', fontSize: 15, fontWeight: '700' },
+    timerBtnsRow: {
+        flexDirection: 'row',
+        width: '100%',
         gap: 10,
+        marginTop: 14,
     },
-    startBtnIcon: {
-        color: '#000000',
-        fontSize: 16,
-        fontWeight: '900',
+    breakBtn: {
+        flex: 1,
+        backgroundColor: '#18181C',
+        borderRadius: 14,
+        paddingVertical: 15,
+        alignItems: 'center',
+        borderWidth: 1,
+        borderColor: '#F59E0B',
     },
-    startBtnText: {
-        color: '#000000',
-        fontSize: 14,
-        fontWeight: '900',
-        letterSpacing: 1,
+    breakBtnResume: {
+        backgroundColor: 'rgba(245, 158, 11, 0.16)',
     },
+    breakBtnText: { color: '#F59E0B', fontSize: 14, fontWeight: '700' },
     stopBtn: {
-        flexDirection: 'row',
-        backgroundColor: '#ef4444',
+        backgroundColor: '#FB7185',
         borderRadius: 14,
-        paddingVertical: 16,
-        justifyContent: 'center',
+        paddingVertical: 15,
         alignItems: 'center',
-        gap: 10,
     },
-    stopBtnIcon: {
-        color: '#ffffff',
-        fontSize: 14,
-        fontWeight: '900',
-    },
-    stopBtnText: {
-        color: '#ffffff',
-        fontSize: 14,
-        fontWeight: '900',
-        letterSpacing: 1,
-    },
-
-    // Historial
-    historySection: {
-        marginTop: 8,
-    },
-    historyHeader: {
-        flexDirection: 'row',
-        justifyContent: 'space-between',
-        alignItems: 'baseline',
-        marginBottom: 12,
-    },
-    historyTitle: {
-        color: '#71717a',
-        fontSize: 11,
-        fontWeight: '800',
-        letterSpacing: 1,
-    },
-    historySubtitle: {
-        color: '#52525b',
-        fontSize: 11,
-        fontWeight: '600',
-    },
+    stopBtnText: { color: '#000000', fontSize: 15, fontWeight: '700' },
+    sectionTitle: { color: '#FAFAFA', fontSize: 16, fontWeight: '700', marginBottom: 12 },
     sessionCard: {
         flexDirection: 'row',
         justifyContent: 'space-between',
         alignItems: 'center',
-        backgroundColor: '#0a0a0c',
-        borderRadius: 14,
+        backgroundColor: '#111114',
+        borderRadius: 16,
         padding: 14,
         borderWidth: 1,
-        borderColor: '#1f1f23',
+        borderColor: '#232329',
         marginBottom: 10,
     },
-    sessionInfoWrap: {
-        flex: 1,
+    sessionTopRow: { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 6 },
+    sessionDate: { color: '#F4F4F5', fontSize: 14, fontWeight: '600' },
+    splitBadge: {
+        backgroundColor: 'rgba(56, 189, 248, 0.14)',
+        paddingHorizontal: 6,
+        paddingVertical: 2,
+        borderRadius: 6,
     },
-    sessionDateRow: {
-        flexDirection: 'row',
-        alignItems: 'baseline',
-        gap: 8,
-        marginBottom: 3,
+    splitBadgeText: { color: '#38BDF8', fontSize: 10, fontWeight: '700' },
+    extraBadge: {
+        backgroundColor: 'rgba(245, 158, 11, 0.14)',
+        paddingHorizontal: 6,
+        paddingVertical: 2,
+        borderRadius: 6,
     },
-    sessionDate: {
-        color: '#f4f4f5',
-        fontSize: 14,
-        fontWeight: '700',
-    },
-    sessionHoursRange: {
-        color: '#a1a1aa',
-        fontSize: 12,
-        fontWeight: '500',
-    },
-    sessionRateLegend: {
-        color: '#71717a',
-        fontSize: 11,
-    },
-    sessionRight: {
-        flexDirection: 'row',
-        alignItems: 'center',
-        gap: 12,
-    },
-    sessionIncome: {
-        color: '#10b981',
-        fontSize: 16,
-        fontWeight: '900',
-    },
-    deleteBtn: {
-        padding: 6,
-    },
-    deleteBtnText: {
-        color: '#52525b',
-        fontSize: 14,
-        fontWeight: '700',
-    },
+    extraBadgeText: { color: '#F59E0B', fontSize: 10, fontWeight: '700' },
+    sessionSub: { color: '#71717A', fontSize: 12, marginTop: 3 },
+    sessionNote: { color: '#A1A1AA', fontSize: 12, marginTop: 3 },
+    sessionRight: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+    sessionIncome: { color: '#34D399', fontSize: 15, fontWeight: '700' },
+    deleteBtn: { padding: 4 },
+    deleteText: { color: '#52525B', fontSize: 14, fontWeight: '700' },
     emptyCard: {
-        backgroundColor: '#0a0a0c',
-        borderRadius: 14,
-        padding: 24,
+        backgroundColor: '#111114',
+        borderRadius: 16,
+        padding: 20,
         alignItems: 'center',
         borderWidth: 1,
-        borderColor: '#1f1f23',
+        borderColor: '#232329',
     },
-    emptyCardText: {
-        color: '#a1a1aa',
-        fontSize: 14,
-        fontWeight: '600',
-    },
-    emptyCardSubText: {
-        color: '#52525b',
-        fontSize: 12,
-        marginTop: 4,
-        textAlign: 'center',
-    },
-
-    // Modal
+    emptyText: { color: '#71717A', fontSize: 13 },
     modalOverlay: {
         flex: 1,
-        backgroundColor: 'rgba(0,0,0,0.85)',
+        backgroundColor: 'rgba(0,0,0,0.82)',
         justifyContent: 'center',
         alignItems: 'center',
         padding: 20,
     },
     modalCard: {
-        backgroundColor: '#101014',
-        borderRadius: 18,
+        backgroundColor: '#111114',
+        borderRadius: 20,
         padding: 20,
         width: '100%',
-        maxWidth: 380,
+        maxWidth: 420,
+        maxHeight: '88%',
         borderWidth: 1,
-        borderColor: '#27272a',
+        borderColor: '#27272E',
     },
-    modalTitle: {
-        color: '#ffffff',
-        fontSize: 18,
-        fontWeight: '800',
-        marginBottom: 4,
-    },
-    modalSub: {
-        color: '#a1a1aa',
-        fontSize: 12,
-        marginBottom: 16,
-        lineHeight: 16,
-    },
-    inputLabel: {
-        color: '#71717a',
-        fontSize: 10,
-        fontWeight: '800',
-        letterSpacing: 0.8,
-        marginBottom: 6,
-    },
-    modalInput: {
-        backgroundColor: '#18181b',
+    modalTitle: { color: '#FAFAFA', fontSize: 18, fontWeight: '700', marginBottom: 4 },
+    modalSub: { color: '#A1A1AA', fontSize: 13, marginBottom: 14 },
+    dateRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 14 },
+    smallChip: {
+        paddingHorizontal: 10,
+        paddingVertical: 8,
         borderRadius: 10,
-        paddingHorizontal: 14,
+        backgroundColor: '#18181C',
+        borderWidth: 1,
+        borderColor: '#27272E',
+    },
+    smallChipActive: { backgroundColor: '#38BDF8', borderColor: '#38BDF8' },
+    smallChipText: { color: '#A1A1AA', fontSize: 12, fontWeight: '600' },
+    smallChipTextActive: { color: '#000000', fontWeight: '700' },
+    dateInput: {
+        flex: 1,
+        backgroundColor: '#18181C',
+        borderRadius: 10,
+        paddingHorizontal: 10,
+        paddingVertical: 7,
+        color: '#FAFAFA',
+        fontSize: 13,
+        borderWidth: 1,
+        borderColor: '#27272E',
+    },
+    toggleRow: { flexDirection: 'row', gap: 8, marginBottom: 14 },
+    toggleBtn: {
+        flex: 1,
         paddingVertical: 10,
-        color: '#ffffff',
-        fontSize: 15,
-        fontWeight: '700',
-        borderWidth: 1,
-        borderColor: '#27272a',
-        marginBottom: 14,
-    },
-    modalPreview: {
-        backgroundColor: 'rgba(16, 185, 129, 0.1)',
-        padding: 12,
         borderRadius: 10,
+        backgroundColor: '#18181C',
+        alignItems: 'center',
         borderWidth: 1,
-        borderColor: 'rgba(16, 185, 129, 0.25)',
-        marginBottom: 16,
+        borderColor: '#27272E',
+    },
+    toggleBtnActive: { backgroundColor: '#38BDF8', borderColor: '#38BDF8' },
+    toggleText: { color: '#A1A1AA', fontSize: 13, fontWeight: '600' },
+    toggleTextActive: { color: '#000000', fontWeight: '700' },
+    twoCol: { flexDirection: 'row', gap: 10 },
+    inputLabel: { color: '#A1A1AA', fontSize: 12, marginBottom: 6 },
+    modalInput: {
+        backgroundColor: '#18181C',
+        borderRadius: 12,
+        paddingHorizontal: 12,
+        paddingVertical: 10,
+        color: '#FAFAFA',
+        fontSize: 14,
+        borderWidth: 1,
+        borderColor: '#27272E',
+        marginBottom: 12,
+    },
+    previewBox: {
+        backgroundColor: '#18181C',
+        borderRadius: 14,
+        padding: 12,
+        borderWidth: 1,
+        borderColor: '#27272E',
+        marginBottom: 14,
         alignItems: 'center',
     },
-    modalPreviewLabel: {
-        color: '#a1a1aa',
-        fontSize: 11,
-        fontWeight: '600',
-    },
-    modalPreviewAmount: {
-        color: '#10b981',
-        fontSize: 20,
-        fontWeight: '900',
-        marginTop: 2,
-    },
-    modalActions: {
-        flexDirection: 'row',
-        gap: 10,
-    },
+    previewTitle: { color: '#71717A', fontSize: 11, fontWeight: '600' },
+    previewLine: { color: '#A1A1AA', fontSize: 12, marginTop: 2 },
+    previewTotal: { color: '#34D399', fontSize: 19, fontWeight: '700', marginTop: 4 },
+    modalActions: { flexDirection: 'row', gap: 10 },
     modalCancelBtn: {
         flex: 1,
-        backgroundColor: '#1c1c20',
-        borderRadius: 10,
+        backgroundColor: '#18181C',
+        borderRadius: 12,
         paddingVertical: 12,
         alignItems: 'center',
     },
-    modalCancelBtnText: {
-        color: '#a1a1aa',
-        fontSize: 13,
-        fontWeight: '700',
-    },
+    modalCancelText: { color: '#A1A1AA', fontSize: 14, fontWeight: '600' },
     modalConfirmBtn: {
         flex: 1,
-        backgroundColor: '#06b6d4',
-        borderRadius: 10,
+        backgroundColor: '#38BDF8',
+        borderRadius: 12,
         paddingVertical: 12,
         alignItems: 'center',
     },
-    modalConfirmBtnText: {
-        color: '#000000',
-        fontSize: 13,
-        fontWeight: '900',
-    },
+    modalConfirmText: { color: '#000000', fontSize: 14, fontWeight: '700' },
 });
-

@@ -1,213 +1,177 @@
-import React, { useState } from 'react';
-import { View, Text, TouchableOpacity, StyleSheet, SafeAreaView, StatusBar, ScrollView } from 'react-native';
+import React, { useState, useEffect } from 'react';
+import {
+    View,
+    Text,
+    TouchableOpacity,
+    StyleSheet,
+    SafeAreaView,
+    StatusBar,
+    Platform,
+} from 'react-native';
 import DashboardScreen from './DashboardScreen';
+import AnalyticsScreen from './AnalyticsScreen';
 import WorkScreen from './WorkScreen';
 import FinanceScreen from './FinanceScreen';
 import AddMealScreen from './AddMealScreen';
-import ProfileScreen from './ProfileScreen';
 import WorkoutScreen from './WorkoutScreen';
 import CalendarScreen from './CalendarScreen';
+import ProfileScreen from './ProfileScreen';
+import AssistantScreen from './AssistantScreen';
+import CelebrationOverlay from './CelebrationOverlay';
+import { subscribeGoalCelebration } from './dataStore';
+
+const BOTTOM_TABS = [
+    { id: 'dashboard', label: 'Inicio', icon: '🏠' },
+    { id: 'assistant', label: 'Asistente', icon: '🧠' },
+    { id: 'analytics', label: 'Análisis', icon: '📊' },
+    { id: 'calendar', label: 'Agenda', icon: '📅' },
+    { id: 'profile', label: 'Ajustes', icon: '⚙️' },
+];
 
 export default function App() {
-    // Pantalla activa: 'dashboard' | 'work' | 'finance' | 'meal' | 'workout' | 'calendar' | 'profile'
     const [currentScreen, setCurrentScreen] = useState('dashboard');
+    const [celebration, setCelebration] = useState({ visible: false, goalTitle: '', message: '' });
+
+    useEffect(() => {
+        const unsub = subscribeGoalCelebration((payload) => {
+            if (payload) {
+                setCelebration({
+                    visible: true,
+                    goalTitle: payload.goalTitle || 'Objetivo completado',
+                    message: payload.message || '',
+                });
+            }
+        });
+        return unsub;
+    }, []);
 
     const renderScreen = () => {
         switch (currentScreen) {
             case 'dashboard':
-                return <DashboardScreen onNavigate={(screen) => setCurrentScreen(screen)} />;
+                return <DashboardScreen onNavigate={setCurrentScreen} />;
+            case 'assistant':
+                return <AssistantScreen onNavigate={setCurrentScreen} />;
+            case 'analytics':
+                return <AnalyticsScreen onNavigate={setCurrentScreen} />;
             case 'work':
-                return <WorkScreen onNavigate={(screen) => setCurrentScreen(screen)} />;
+                return <WorkScreen onNavigate={setCurrentScreen} />;
             case 'finance':
-                return <FinanceScreen onNavigate={(screen) => setCurrentScreen(screen)} />;
+                return <FinanceScreen onNavigate={setCurrentScreen} />;
             case 'meal':
-                return <AddMealScreen onNavigate={(screen) => setCurrentScreen(screen)} />;
-            case 'profile':
-                return <ProfileScreen onNavigate={(screen) => setCurrentScreen(screen)} />;
+                return <AddMealScreen onNavigate={setCurrentScreen} />;
             case 'workout':
-                return <WorkoutScreen onNavigate={(screen) => setCurrentScreen(screen)} />;
+                return <WorkoutScreen onNavigate={setCurrentScreen} />;
             case 'calendar':
-                return <CalendarScreen onNavigate={(screen) => setCurrentScreen(screen)} />;
+                return <CalendarScreen onNavigate={setCurrentScreen} />;
+            case 'profile':
+                return <ProfileScreen onNavigate={setCurrentScreen} />;
             default:
-                return <DashboardScreen onNavigate={(screen) => setCurrentScreen(screen)} />;
+                return <DashboardScreen onNavigate={setCurrentScreen} />;
         }
     };
 
+    const isModuleScreen = ['work', 'finance', 'meal', 'workout'].includes(currentScreen);
+
     return (
-        <SafeAreaView style={styles.container}>
+        <SafeAreaView style={styles.safeContainer}>
             <StatusBar barStyle="light-content" backgroundColor="#000000" />
 
-            {/* Contenido Dinámico */}
             <View style={styles.content}>
                 {renderScreen()}
             </View>
 
-            {/* Barra de Navegación Ejecutiva Inferior */}
-            <View style={styles.navBar}>
-                <TouchableOpacity
-                    style={styles.navItem}
-                    onPress={() => setCurrentScreen('dashboard')}
-                >
-                    <Text style={[styles.navIcon, currentScreen === 'dashboard' && styles.navIconActive]}>
-                        📊
-                    </Text>
-                    <Text style={[styles.navText, currentScreen === 'dashboard' && styles.activeNavText]}>
-                        Dashboard
-                    </Text>
-                </TouchableOpacity>
-
-                <TouchableOpacity
-                    style={styles.navItem}
-                    onPress={() => setCurrentScreen('work')}
-                >
-                    <Text style={[styles.navIcon, currentScreen === 'work' && styles.navIconActive]}>
-                        ⏱️
-                    </Text>
-                    <Text style={[styles.navText, currentScreen === 'work' && styles.activeNavText]}>
-                        Jornada
-                    </Text>
-                </TouchableOpacity>
-
-                <TouchableOpacity
-                    style={styles.navItem}
-                    onPress={() => setCurrentScreen('finance')}
-                >
-                    <Text style={[styles.navIcon, currentScreen === 'finance' && styles.navIconActive]}>
-                        💳
-                    </Text>
-                    <Text style={[styles.navText, currentScreen === 'finance' && styles.activeNavText]}>
-                        Economía
-                    </Text>
-                </TouchableOpacity>
-
-                <TouchableOpacity
-                    style={styles.navItem}
-                    onPress={() => setCurrentScreen('meal')}
-                >
-                    <Text style={[styles.navIcon, currentScreen === 'meal' && styles.navIconActive]}>
-                        🥩
-                    </Text>
-                    <Text style={[styles.navText, currentScreen === 'meal' && styles.activeNavText]}>
-                        Dietas
-                    </Text>
-                </TouchableOpacity>
-
-                <TouchableOpacity
-                    style={styles.navItem}
-                    onPress={() => setCurrentScreen('workout')}
-                >
-                    <Text style={[styles.navIcon, currentScreen === 'workout' && styles.navIconActive]}>
-                        🏋️‍♂️
-                    </Text>
-                    <Text style={[styles.navText, currentScreen === 'workout' && styles.activeNavText]}>
-                        Entreno
-                    </Text>
-                </TouchableOpacity>
-
-                <TouchableOpacity
-                    style={styles.navItem}
-                    onPress={() => setCurrentScreen('calendar')}
-                >
-                    <Text style={[styles.navIcon, currentScreen === 'calendar' && styles.navIconActive]}>
-                        📅
-                    </Text>
-                    <Text style={[styles.navText, currentScreen === 'calendar' && styles.activeNavText]}>
-                        Agenda
-                    </Text>
-                </TouchableOpacity>
-
-                <TouchableOpacity
-                    style={styles.navItem}
-                    onPress={() => setCurrentScreen('profile')}
-                >
-                    <Text style={[styles.navIcon, currentScreen === 'profile' && styles.navIconActive]}>
-                        ⚙️
-                    </Text>
-                    <Text style={[styles.navText, currentScreen === 'profile' && styles.activeNavText]}>
-                        Perfil
-                    </Text>
-                </TouchableOpacity>
+            {/* Barra de navegación inferior limpia y espaciosa */}
+            <View style={styles.navBarOuter}>
+                <View style={styles.navBarInner}>
+                    {BOTTOM_TABS.map((tab) => {
+                        const active =
+                            currentScreen === tab.id ||
+                            (tab.id === 'dashboard' && isModuleScreen);
+                        return (
+                            <TouchableOpacity
+                                key={tab.id}
+                                style={styles.navItem}
+                                activeOpacity={0.7}
+                                onPress={() => setCurrentScreen(tab.id)}
+                            >
+                                <Text
+                                    style={[
+                                        styles.navIcon,
+                                        active && styles.navIconActive,
+                                    ]}
+                                >
+                                    {tab.icon}
+                                </Text>
+                                <Text
+                                    style={[
+                                        styles.navLabel,
+                                        active && styles.navLabelActive,
+                                    ]}
+                                >
+                                    {tab.label}
+                                </Text>
+                            </TouchableOpacity>
+                        );
+                    })}
+                </View>
             </View>
+
+            <CelebrationOverlay
+                visible={celebration.visible}
+                goalTitle={celebration.goalTitle}
+                message={celebration.message}
+                onDismiss={() => setCelebration({ visible: false, goalTitle: '', message: '' })}
+            />
         </SafeAreaView>
     );
 }
 
 const styles = StyleSheet.create({
-    container: {
+    safeContainer: {
         flex: 1,
         backgroundColor: '#000000',
+        paddingTop: Platform.OS === 'android' ? StatusBar.currentHeight || 0 : 0,
         height: '100%',
     },
     content: {
         flex: 1,
+        width: '100%',
     },
-    navBar: {
-        flexDirection: 'row',
-        backgroundColor: '#0a0a0c',
+    navBarOuter: {
+        backgroundColor: '#09090B',
         borderTopWidth: 1,
-        borderTopColor: '#1f1f23',
-        paddingBottom: 16,
+        borderTopColor: '#1E1E24',
         paddingTop: 8,
-        paddingHorizontal: 4,
+        paddingBottom: Platform.OS === 'ios' ? 14 : 10,
+        paddingHorizontal: 16,
+    },
+    navBarInner: {
+        flexDirection: 'row',
+        width: '100%',
+        maxWidth: 520,
+        alignSelf: 'center',
     },
     navItem: {
         flex: 1,
         alignItems: 'center',
+        justifyContent: 'center',
         paddingVertical: 4,
     },
     navIcon: {
-        fontSize: 18,
-        opacity: 0.5,
-        marginBottom: 2,
+        fontSize: 19,
+        opacity: 0.45,
+        marginBottom: 3,
     },
     navIconActive: {
         opacity: 1,
     },
-    navText: {
-        color: '#71717a',
-        fontSize: 10,
-        fontWeight: '600',
+    navLabel: {
+        color: '#71717A',
+        fontSize: 11,
+        fontWeight: '500',
     },
-    activeNavText: {
-        color: '#06b6d4',
-        fontWeight: '800',
-    },
-    placeholderContainer: {
-        flex: 1,
-        justifyContent: 'center',
-        alignItems: 'center',
-        padding: 30,
-        backgroundColor: '#000000',
-    },
-    placeholderIcon: {
-        fontSize: 54,
-        marginBottom: 16,
-    },
-    placeholderTitle: {
-        color: '#ffffff',
-        fontSize: 22,
-        fontWeight: '900',
-        marginBottom: 8,
-        textAlign: 'center',
-    },
-    placeholderSub: {
-        color: '#a1a1aa',
-        fontSize: 14,
-        textAlign: 'center',
-        lineHeight: 20,
-        marginBottom: 24,
-    },
-    backToHomeBtn: {
-        backgroundColor: '#18181b',
-        paddingHorizontal: 18,
-        paddingVertical: 10,
-        borderRadius: 10,
-        borderWidth: 1,
-        borderColor: '#27272a',
-    },
-    backToHomeBtnText: {
-        color: '#06b6d4',
-        fontSize: 13,
+    navLabelActive: {
+        color: '#FAFAFA',
         fontWeight: '700',
     },
 });
